@@ -76,7 +76,7 @@ func saveHash(_ hash: String) {
     try? hash.write(toFile: hashFile, atomically: true, encoding: .utf8)
 }
 
-func sendNotification(message: String) {
+func sendNotification(_ message: String) {
     guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
