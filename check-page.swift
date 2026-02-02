@@ -7,8 +7,8 @@ let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
 let hashFile = "page-hash.txt"
 
 // Get credentials from environment variables
-let username = ProcessInfo.processInfo.environment["PAGE_USERNAME"] ?? "gsimon@mandn.aero"
-let password = ProcessInfo.processInfo.environment["PAGE_PASSWORD"] ?? "tecmim-0koxho-jebbUt"
+let username = ProcessInfo.processInfo.environment["PAGE_USERNAME"] ?? ""
+let password = ProcessInfo.processInfo.environment["PAGE_PASSWORD"] ?? ""
 
 func fetchPage() -> String? {
     guard let url = URL(string: urlToCheck) else { return nil }
