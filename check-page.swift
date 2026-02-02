@@ -6,22 +6,27 @@ let urlToCheck = "https://portal.jetinsight.com/schedule/aircraft?view_name=roll
 let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
 let hashFile = "page-hash.txt"
 
-// Get credentials from environment variables
 let username = ProcessInfo.processInfo.environment["PAGE_USERNAME"] ?? ""
 let password = ProcessInfo.processInfo.environment["PAGE_PASSWORD"] ?? ""
 
 func fetchPage() -> String? {
-    guard let url = URL(string: urlToCheck) else { return nil }
+    print("Attempting to fetch: \(urlToCheck)")
+    print("Username configured: \(!username.isEmpty)")
+    
+    guard let url = URL(string: urlToCheck) else {
+        print("ERROR: Invalid URL")
+        return nil
+    }
     
     var request = URLRequest(url: url)
     request.timeoutInterval = 30
     
-    // Add Basic Auth
     if !username.isEmpty && !password.isEmpty {
         let credentials = "\(username):\(password)"
         if let credentialsData = credentials.data(using: .utf8) {
             let base64Credentials = credentialsData.base64EncodedString()
             request.setValue("Basic \(base64Credentials)", forHTTPHeaderField: "Authorization")
+            print("Basic Auth header added")
         }
     }
     
@@ -32,16 +37,26 @@ func fetchPage() -> String? {
         defer { semaphore.signal() }
         
         if let error = error {
-            print("Error: \(error.localizedDescription)")
+            print("ERROR: \(error.localizedDescription)")
             return
         }
         
         if let httpResponse = response as? HTTPURLResponse {
-            print("Status code: \(httpResponse.statusCode)")
+            print("HTTP Status: \(httpResponse.statusCode)")
+            
+            if httpResponse.statusCode == 401 {
+                print("ERROR: Authentication failed (401)")
+            } else if httpResponse.statusCode >= 400 {
+                print("ERROR: HTTP error \(httpResponse.statusCode)")
+            }
         }
         
-        if let data = data {
-            result = String(data: data, encoding: .utf8)
+        if let data = data, let content = String(data: data, encoding: .utf8) {
+            print("Content length: \(content.count) characters")
+            print("First 200 chars: \(String(content.prefix(200)))")
+            result = content
+        } else {
+            print("ERROR: No data or failed to decode")
         }
     }.resume()
     
@@ -74,22 +89,29 @@ func sendNotification(message: String) {
     semaphore.wait()
 }
 
+print("=== Starting page check ===")
+
 guard let content = fetchPage() else {
-    print("Failed to fetch page")
+    print("FATAL: Failed to fetch page")
     exit(1)
 }
+
+print("=== Page fetched successfully ===")
 
 let currentHash = getHash(content)
 let previousHash = getPreviousHash()
 
+print("Current hash: \(currentHash)")
+print("Previous hash: \(previousHash ?? "none")")
+
 if previousHash != currentHash {
     if previousHash != nil {
         sendNotification("Page changed! \(urlToCheck)")
-        print("Change detected, notification sent")
+        print("✓ Change detected, notification sent")
     } else {
-        print("First run, saving hash")
+        print("✓ First run, saving hash")
     }
     saveHash(currentHash)
 } else {
-    print("No changes detected")
+    print("✓ No changes detected")
 }
