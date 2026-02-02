@@ -2,8 +2,8 @@ name: Check Page
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
-  workflow_dispatch:  # Manual trigger
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   check:
@@ -12,6 +12,9 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Check page
+        env:
+          PAGE_USERNAME: ${{ secrets.PAGE_USERNAME }}
+          PAGE_PASSWORD: ${{ secrets.PAGE_PASSWORD }}
         run: swift check-page.swift
       
       - name: Commit hash if changed
