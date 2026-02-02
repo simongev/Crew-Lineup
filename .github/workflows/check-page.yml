@@ -1,0 +1,22 @@
+name: Check Page
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check page
+        run: swift check-page.swift
+      
+      - name: Commit hash if changed
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add page-hash.txt || true
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update hash" && git push)
