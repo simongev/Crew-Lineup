@@ -44,12 +44,14 @@ let session = URLSession(configuration: config)
 
 func login() -> Bool {
     print("Attempting login...")
+    print("Username length: \(username.count)")
+    print("Password length: \(password.count)")
     
     guard let url = URL(string: loginURL) else { return false }
     
-    // Get login page
     let semaphore = DispatchSemaphore(value: 0)
     var csrfToken: String?
+    var htmlContent: String?
     
     var getRequest = URLRequest(url: url)
     getRequest.httpMethod = "GET"
@@ -58,19 +60,45 @@ func login() -> Bool {
         defer { semaphore.signal() }
         
         if let data = data, let html = String(data: data, encoding: .utf8) {
+            htmlContent = html
+            
+            // Look for CSRF token
             if let range = html.range(of: "name=\"authenticity_token\"[^>]*value=\"([^\"]+)\"", options: .regularExpression) {
                 let match = String(html[range])
                 if let valueRange = match.range(of: "value=\"([^\"]+)\"", options: .regularExpression) {
                     let valueMatch = String(match[valueRange])
-                    csrfToken = valueMatch.replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", with: "")
+                    csrfToken = valueMatch.replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", from: "")
                 }
             }
             
-            print("Login page length: \(html.count)")
-        }
-        
-        if let httpResponse = response as? HTTPURLResponse {
-            print("Get login page status: \(httpResponse.statusCode)")
+            // Look for form fields
+            print("\n--- Form Analysis ---")
+            let emailPatterns = [
+                "name=\"user\\[email\\]\"",
+                "name=\"email\"",
+                "id=\"user_email\"",
+                "type=\"email\""
+            ]
+            
+            for pattern in emailPatterns {
+                if html.range(of: pattern, options: .regularExpression) != nil {
+                    print("Found email field pattern: \(pattern)")
+                }
+            }
+            
+            let passwordPatterns = [
+                "name=\"user\\[password\\]\"",
+                "name=\"password\"",
+                "id=\"user_password\"",
+                "type=\"password\""
+            ]
+            
+            for pattern in passwordPatterns {
+                if html.range(of: pattern, options: .regularExpression) != nil {
+                    print("Found password field pattern: \(pattern)")
+                }
+            }
+            print("---\n")
         }
     }.resume()
     
@@ -78,6 +106,9 @@ func login() -> Bool {
     
     guard let token = csrfToken else {
         print("Failed to extract CSRF token")
+        if let html = htmlContent {
+            print("HTML snippet: \(String(html.prefix(1000)))")
+        }
         return false
     }
     
@@ -88,6 +119,7 @@ func login() -> Bool {
     postRequest.httpMethod = "POST"
     postRequest.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
     postRequest.setValue(loginURL, forHTTPHeaderField: "Referer")
+    postRequest.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
     
     let params = [
         "authenticity_token": token,
@@ -97,6 +129,9 @@ func login() -> Bool {
     ]
     
     let bodyString = params.map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" }.joined(separator: "&")
+    
+    print("POST body (without password): authenticity_token=..&user[email]=\(username)&user[password]=***&commit=Sign+in")
+    
     postRequest.httpBody = bodyString.data(using: .utf8)
     
     var loginSuccess = false
@@ -108,26 +143,30 @@ func login() -> Bool {
         if let httpResponse = response as? HTTPURLResponse {
             print("Login POST status: \(httpResponse.statusCode)")
             
-            // Check if redirected (302/303) or got a successful response
             if httpResponse.statusCode == 302 || httpResponse.statusCode == 303 {
+                if let location = httpResponse.allHeaderFields["Location"] as? String {
+                    print("Redirected to: \(location)")
+                }
                 loginSuccess = true
-                print("Login redirect detected - success")
             } else if httpResponse.statusCode == 200 {
-                // Check response content
                 if let data = data, let html = String(data: data, encoding: .utf8) {
-                    if html.contains("Invalid Email or password") || html.contains("sign_in") {
-                        print("Login failed - invalid credentials")
+                    if html.contains("Invalid Email or password") {
+                        print("ERROR: Invalid credentials message found")
+                    } else if html.contains("user[email]") || html.contains("sign_in") {
+                        print("ERROR: Still showing login form")
                     } else {
                         loginSuccess = true
-                        print("Login appears successful")
+                        print("Login appears successful (no login form)")
                     }
                 }
             }
         }
         
-        // Print cookies
         if let cookies = HTTPCookieStorage.shared.cookies {
             print("Cookies after login: \(cookies.count)")
+            for cookie in cookies {
+                print("  - \(cookie.name)")
+            }
         }
     }.resume()
     
@@ -173,14 +212,14 @@ func fetchFlights() -> [Flight]? {
         
         if let httpResponse = response as? HTTPURLResponse {
             print("HTTP Status: \(httpResponse.statusCode)")
-            print("Content-Type: \(httpResponse.allHeaderFields["Content-Type"] ?? "unknown")")
+            let contentType = httpResponse.allHeaderFields["Content-Type"] as? String ?? "unknown"
+            print("Content-Type: \(contentType)")
         }
         
         guard let data = data else { return }
         
         if let responseString = String(data: data, encoding: .utf8) {
             print("Response length: \(responseString.count) characters")
-            print("First 200 chars: \(String(responseString.prefix(200)))")
             
             if responseString.contains("<!DOCTYPE html>") {
                 print("ERROR: Got HTML instead of JSON")
@@ -233,7 +272,7 @@ func sendNotification(_ message: String) {
 print("=== Starting flight check ===")
 
 guard login() else {
-    print("FATAL: Login failed - check credentials")
+    print("FATAL: Login failed - check credentials in GitHub Secrets")
     exit(1)
 }
 
