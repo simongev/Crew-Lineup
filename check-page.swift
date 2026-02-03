@@ -67,7 +67,7 @@ func login() -> Bool {
                 let match = String(html[range])
                 if let valueRange = match.range(of: "value=\"([^\"]+)\"", options: .regularExpression) {
                     let valueMatch = String(match[valueRange])
-                    csrfToken = valueMatch.replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", from: "")
+                    csrfToken = valueMatch.replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", with: "")
                 }
             }
             
