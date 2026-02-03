@@ -8,9 +8,9 @@ let aircraftUUIDs = [
     "f15b98b7-9d5b-4dcb-bfd5-7faf0bf7a911",
     "445712bc-4a8d-42c9-8b69-26036ab16cf4"
 ]
-let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
+let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
-let myLastName = "Simon" // CHANGE THIS to your last name
+let myLastName = "Navon" // CHANGE THIS to your last name
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
@@ -77,14 +77,28 @@ func buildURL() -> String {
 }
 
 func sendNotification(_ message: String) {
-    print("📲 \(message)")
-    guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
+    print("📲 Sending to topic: '\(ntfyTopic)'")
+    print("📲 Message: \(message)")
+    
+    guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else {
+        print("ERROR: Invalid ntfy URL")
+        return
+    }
+    
+    print("📲 URL: \(url.absoluteString)")
+    
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = message.data(using: .utf8)
     
     let semaphore = DispatchSemaphore(value: 0)
-    URLSession.shared.dataTask(with: request) { _, _, _ in
+    URLSession.shared.dataTask(with: request) { data, response, error in
+        if let error = error {
+            print("📲 Notification error: \(error.localizedDescription)")
+        }
+        if let httpResponse = response as? HTTPURLResponse {
+            print("📲 Notification response: \(httpResponse.statusCode)")
+        }
         semaphore.signal()
     }.resume()
     semaphore.wait()
@@ -210,7 +224,7 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
-sendNotification("✅ Flight checker is running")  // TEST NOTIFICATION
+sendNotification("✅ Flight checker is running")
 
 guard let currentFlights = fetchFlights() else {
     print("FATAL: Failed to fetch flights")
