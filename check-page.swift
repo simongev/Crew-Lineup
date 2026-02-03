@@ -26,7 +26,7 @@ struct Flight: Codable, Hashable {
         self.id = dict["id"] as? String ?? UUID().uuidString
         self.title = dict["title"] as? String
         self.start = dict["start"] as? String
-        self.end = dict["end") as? String
+        self.end = dict["end"] as? String
         
         if let crewArray = dict["crew"] as? [[String: Any]] {
             self.crew = crewArray.compactMap { $0["name"] as? String }
