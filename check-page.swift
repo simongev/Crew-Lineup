@@ -36,67 +36,98 @@ struct Flight: Codable, Hashable {
     }
 }
 
-class SessionManager {
-    static let shared = SessionManager()
-    var cookies: [HTTPCookie] = []
-    
-    private init() {}
-}
+let config = URLSessionConfiguration.default
+config.httpCookieAcceptPolicy = .always
+config.httpShouldSetCookies = true
+config.httpCookieStorage = HTTPCookieStorage.shared
+let session = URLSession(configuration: config)
 
 func login() -> Bool {
     print("Attempting login...")
     
-    // First, get the login page to extract CSRF token
     guard let url = URL(string: loginURL) else { return false }
     
-    let config = URLSessionConfiguration.default
-    config.httpCookieStorage = HTTPCookieStorage.shared
-    config.httpCookieAcceptPolicy = .always
-    let session = URLSession(configuration: config)
-    
+    // Get login page
     let semaphore = DispatchSemaphore(value: 0)
     var csrfToken: String?
     
-    session.dataTask(with: url) { data, response, error in
+    var getRequest = URLRequest(url: url)
+    getRequest.httpMethod = "GET"
+    
+    session.dataTask(with: getRequest) { data, response, error in
         defer { semaphore.signal() }
         
         if let data = data, let html = String(data: data, encoding: .utf8) {
-            // Extract CSRF token from HTML
-            if let range = html.range(of: "name=\"authenticity_token\" value=\"([^\"]+)\"", options: .regularExpression) {
+            if let range = html.range(of: "name=\"authenticity_token\"[^>]*value=\"([^\"]+)\"", options: .regularExpression) {
                 let match = String(html[range])
-                if let tokenRange = match.range(of: "value=\"([^\"]+)\"", options: .regularExpression) {
-                    csrfToken = String(match[tokenRange]).replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", with: "")
+                if let valueRange = match.range(of: "value=\"([^\"]+)\"", options: .regularExpression) {
+                    let valueMatch = String(match[valueRange])
+                    csrfToken = valueMatch.replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", with: "")
                 }
             }
+            
+            print("Login page length: \(html.count)")
+        }
+        
+        if let httpResponse = response as? HTTPURLResponse {
+            print("Get login page status: \(httpResponse.statusCode)")
         }
     }.resume()
     
     semaphore.wait()
     
     guard let token = csrfToken else {
-        print("Failed to get CSRF token")
+        print("Failed to extract CSRF token")
         return false
     }
     
-    print("Got CSRF token")
+    print("CSRF token: \(token.prefix(20))...")
     
-    // Now submit login
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    // Submit login
+    var postRequest = URLRequest(url: url)
+    postRequest.httpMethod = "POST"
+    postRequest.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    postRequest.setValue(loginURL, forHTTPHeaderField: "Referer")
     
-    let bodyString = "authenticity_token=\(token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)&user[email]=\(username.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)&user[password]=\(password.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)&commit=Sign+in"
-    request.httpBody = bodyString.data(using: .utf8)
+    let params = [
+        "authenticity_token": token,
+        "user[email]": username,
+        "user[password]": password,
+        "commit": "Sign in"
+    ]
+    
+    let bodyString = params.map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" }.joined(separator: "&")
+    postRequest.httpBody = bodyString.data(using: .utf8)
     
     var loginSuccess = false
     let loginSemaphore = DispatchSemaphore(value: 0)
     
-    session.dataTask(with: request) { data, response, error in
+    session.dataTask(with: postRequest) { data, response, error in
         defer { loginSemaphore.signal() }
         
         if let httpResponse = response as? HTTPURLResponse {
-            print("Login status: \(httpResponse.statusCode)")
-            loginSuccess = httpResponse.statusCode == 302 || httpResponse.statusCode == 200
+            print("Login POST status: \(httpResponse.statusCode)")
+            
+            // Check if redirected (302/303) or got a successful response
+            if httpResponse.statusCode == 302 || httpResponse.statusCode == 303 {
+                loginSuccess = true
+                print("Login redirect detected - success")
+            } else if httpResponse.statusCode == 200 {
+                // Check response content
+                if let data = data, let html = String(data: data, encoding: .utf8) {
+                    if html.contains("Invalid Email or password") || html.contains("sign_in") {
+                        print("Login failed - invalid credentials")
+                    } else {
+                        loginSuccess = true
+                        print("Login appears successful")
+                    }
+                }
+            }
+        }
+        
+        // Print cookies
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            print("Cookies after login: \(cookies.count)")
         }
     }.resume()
     
@@ -126,10 +157,6 @@ func fetchFlights() -> [Flight]? {
     
     guard let url = URL(string: urlString) else { return nil }
     
-    let config = URLSessionConfiguration.default
-    config.httpCookieStorage = HTTPCookieStorage.shared
-    let session = URLSession(configuration: config)
-    
     var request = URLRequest(url: url)
     request.timeoutInterval = 30
     
@@ -153,8 +180,10 @@ func fetchFlights() -> [Flight]? {
         
         if let responseString = String(data: data, encoding: .utf8) {
             print("Response length: \(responseString.count) characters")
+            print("First 200 chars: \(String(responseString.prefix(200)))")
+            
             if responseString.contains("<!DOCTYPE html>") {
-                print("ERROR: Got HTML instead of JSON - authentication failed")
+                print("ERROR: Got HTML instead of JSON")
                 return
             }
         }
@@ -204,11 +233,11 @@ func sendNotification(_ message: String) {
 print("=== Starting flight check ===")
 
 guard login() else {
-    print("FATAL: Login failed")
+    print("FATAL: Login failed - check credentials")
     exit(1)
 }
 
-print("Login successful")
+print("✓ Login successful")
 
 guard let currentFlights = fetchFlights() else {
     print("FATAL: Failed to fetch flights")
