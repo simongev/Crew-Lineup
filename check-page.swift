@@ -2,21 +2,59 @@
 
 import Foundation
 
-let urlToCheck = "https://portal.jetinsight.com/schedule/aircraft?view_name=rollingMonth&first_day=2026-02-04&time_zone=America/New_York" // CHANGE THIS
+let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
+let aircraftUUIDs = [
+    "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
+    "f15b98b7-9d5b-4dcb-bfd5-7faf0bf7a911",
+    "445712bc-4a8d-42c9-8b69-26036ab16cf4"
+]
 let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
-let hashFile = "page-hash.txt"
+let dataFile = "flights-data.json"
 
 let username = ProcessInfo.processInfo.environment["PAGE_USERNAME"] ?? ""
 let password = ProcessInfo.processInfo.environment["PAGE_PASSWORD"] ?? ""
 
-func fetchPage() -> String? {
-    print("Attempting to fetch: \(urlToCheck)")
-    print("Username configured: \(!username.isEmpty)")
+struct Flight: Codable, Hashable {
+    let id: String
+    let title: String?
+    let start: String?
+    let end: String?
+    let crew: [String]?
     
-    guard let url = URL(string: urlToCheck) else {
-        print("ERROR: Invalid URL")
-        return nil
+    init(from dict: [String: Any]) {
+        self.id = dict["id"] as? String ?? UUID().uuidString
+        self.title = dict["title"] as? String
+        self.start = dict["start"] as? String
+        self.end = dict["end"] as? String
+        
+        if let crewArray = dict["crew"] as? [[String: Any]] {
+            self.crew = crewArray.compactMap { $0["name"] as? String }
+        } else {
+            self.crew = nil
+        }
     }
+}
+
+func buildURL() -> String {
+    let now = Date()
+    let weekFromNow = Calendar.current.date(byAdding: .day, value: 7, to: now)!
+    
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    
+    let startDate = formatter.string(from: now).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+    let endDate = formatter.string(from: weekFromNow).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+    
+    let uuidParams = aircraftUUIDs.map { "uuid%5B%5D=\($0)" }.joined(separator: "&")
+    
+    return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
+}
+
+func fetchFlights() -> [Flight]? {
+    let urlString = buildURL()
+    print("Fetching: \(urlString)")
+    
+    guard let url = URL(string: urlString) else { return nil }
     
     var request = URLRequest(url: url)
     request.timeoutInterval = 30
@@ -26,12 +64,11 @@ func fetchPage() -> String? {
         if let credentialsData = credentials.data(using: .utf8) {
             let base64Credentials = credentialsData.base64EncodedString()
             request.setValue("Basic \(base64Credentials)", forHTTPHeaderField: "Authorization")
-            print("Basic Auth header added")
         }
     }
     
     let semaphore = DispatchSemaphore(value: 0)
-    var result: String?
+    var result: [Flight]?
     
     URLSession.shared.dataTask(with: request) { data, response, error in
         defer { semaphore.signal() }
@@ -43,20 +80,18 @@ func fetchPage() -> String? {
         
         if let httpResponse = response as? HTTPURLResponse {
             print("HTTP Status: \(httpResponse.statusCode)")
-            
-            if httpResponse.statusCode == 401 {
-                print("ERROR: Authentication failed (401)")
-            } else if httpResponse.statusCode >= 400 {
-                print("ERROR: HTTP error \(httpResponse.statusCode)")
-            }
+            guard httpResponse.statusCode == 200 else { return }
         }
         
-        if let data = data, let content = String(data: data, encoding: .utf8) {
-            print("Content length: \(content.count) characters")
-            print("First 200 chars: \(String(content.prefix(200)))")
-            result = content
-        } else {
-            print("ERROR: No data or failed to decode")
+        guard let data = data else { return }
+        
+        do {
+            if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                result = json.map { Flight(from: $0) }
+                print("Found \(result?.count ?? 0) flights")
+            }
+        } catch {
+            print("JSON parse error: \(error)")
         }
     }.resume()
     
@@ -64,19 +99,22 @@ func fetchPage() -> String? {
     return result
 }
 
-func getHash(_ content: String) -> String {
-    return String(content.utf8.reduce(0) { $0 &+ Int($1) })
+func loadPreviousFlights() -> [Flight]? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: dataFile)),
+          let flights = try? JSONDecoder().decode([Flight].self, from: data) else {
+        return nil
+    }
+    return flights
 }
 
-func getPreviousHash() -> String? {
-    return try? String(contentsOfFile: hashFile, encoding: .utf8)
-}
-
-func saveHash(_ hash: String) {
-    try? hash.write(toFile: hashFile, atomically: true, encoding: .utf8)
+func saveFlights(_ flights: [Flight]) {
+    if let data = try? JSONEncoder().encode(flights) {
+        try? data.write(to: URL(fileURLWithPath: dataFile))
+    }
 }
 
 func sendNotification(_ message: String) {
+    print("Sending notification: \(message)")
     guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -89,29 +127,45 @@ func sendNotification(_ message: String) {
     semaphore.wait()
 }
 
-print("=== Starting page check ===")
+print("=== Starting flight check ===")
 
-guard let content = fetchPage() else {
-    print("FATAL: Failed to fetch page")
+guard let currentFlights = fetchFlights() else {
+    print("FATAL: Failed to fetch flights")
     exit(1)
 }
 
-print("=== Page fetched successfully ===")
+let previousFlights = loadPreviousFlights()
 
-let currentHash = getHash(content)
-let previousHash = getPreviousHash()
-
-print("Current hash: \(currentHash)")
-print("Previous hash: \(previousHash ?? "none")")
-
-if previousHash != currentHash {
-    if previousHash != nil {
-        sendNotification("Page changed! \(urlToCheck)")
-        print("✓ Change detected, notification sent")
-    } else {
-        print("✓ First run, saving hash")
+if let previous = previousFlights {
+    let previousSet = Set(previous)
+    let currentSet = Set(currentFlights)
+    
+    // Check for new flights
+    let newFlights = currentSet.subtracting(previousSet)
+    for flight in newFlights {
+        let title = flight.title ?? "Unknown"
+        let start = flight.start ?? "Unknown time"
+        sendNotification("🛫 New flight: \(title) at \(start)")
     }
-    saveHash(currentHash)
+    
+    // Check for crew assignments
+    let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+    for current in currentFlights {
+        if let prev = previousByID[current.id] {
+            let prevCrew = Set(prev.crew ?? [])
+            let currentCrew = Set(current.crew ?? [])
+            
+            if prevCrew != currentCrew && !currentCrew.isEmpty {
+                let crewList = currentCrew.sorted().joined(separator: ", ")
+                let title = current.title ?? "Flight"
+                sendNotification("👥 Crew assigned to \(title): \(crewList)")
+            }
+        }
+    }
+    
+    print("✓ Comparison complete")
 } else {
-    print("✓ No changes detected")
+    print("✓ First run, saving initial data")
 }
+
+saveFlights(currentFlights)
