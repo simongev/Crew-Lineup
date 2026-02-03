@@ -10,37 +10,45 @@ let aircraftUUIDs = [
 ]
 let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
 let dataFile = "flights-data.json"
-let myName = "Gev Simon" // CHANGE THIS to your name as it appears in crew list
+let myName = "Simon" // CHANGE THIS to your last name as it appears in crew_last_names
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
 struct Flight: Codable, Hashable {
     let id: String
-    let title: String?
     let start: String?
-    let end: String?
     let crew: [String]?
     let aircraft: String?
     let destination: String?
-    let departure: String?
+    let origin: String?
+    let isActualFlight: Bool
     
     init(from dict: [String: Any]) {
-        self.id = dict["id"] as? String ?? UUID().uuidString
-        self.title = dict["title"] as? String
+        self.id = dict["resourceId"] as? String ?? UUID().uuidString
         self.start = dict["start"] as? String
-        self.end = dict["end"] as? String
         
-        // Extract crew names
-        if let crewArray = dict["crew"] as? [[String: Any]] {
-            self.crew = crewArray.compactMap { $0["name"] as? String }
+        if let props = dict["extendedProps"] as? [String: Any] {
+            self.aircraft = props["aircraft"] as? String
+            self.destination = props["destination_short"] as? String
+            self.origin = props["origin_short"] as? String
+            
+            // Extract crew last names (cleaner than full names with HTML)
+            if let crewLastNames = props["crew_last_names"] as? [String] {
+                self.crew = crewLastNames
+            } else {
+                self.crew = nil
+            }
+            
+            // Only track actual flights, not maintenance/calendar items
+            let eventGroup = props["event_group"] as? String ?? ""
+            self.isActualFlight = eventGroup == "customer_flight"
         } else {
+            self.aircraft = nil
+            self.destination = nil
+            self.origin = nil
             self.crew = nil
+            self.isActualFlight = false
         }
-        
-        // Try to extract aircraft/destination info
-        self.aircraft = dict["aircraft"] as? String ?? dict["tail_number"] as? String
-        self.destination = dict["destination"] as? String ?? dict["arrival_airport"] as? String
-        self.departure = dict["departure"] as? String ?? dict["departure_airport"] as? String
     }
 }
 
@@ -61,7 +69,7 @@ func buildURL() -> String {
 
 func fetchFlights() -> [Flight]? {
     let urlString = buildURL()
-    print("Fetching: \(urlString)")
+    print("Fetching flights...")
     
     guard let url = URL(string: urlString) else { return nil }
     
@@ -81,34 +89,26 @@ func fetchFlights() -> [Flight]? {
         }
         
         if let httpResponse = response as? HTTPURLResponse {
-            print("HTTP Status: \(httpResponse.statusCode)")
+            guard httpResponse.statusCode == 200 else {
+                print("ERROR: HTTP \(httpResponse.statusCode)")
+                return
+            }
         }
         
         guard let data = data else { return }
         
         if let responseString = String(data: data, encoding: .utf8) {
-            print("Response length: \(responseString.count) chars")
-            
             if responseString.contains("<!DOCTYPE html>") {
-                print("ERROR: Got HTML - session expired, update SESSION_COOKIE")
+                print("ERROR: Session expired, update SESSION_COOKIE secret")
                 return
             }
         }
         
         do {
             if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                // Print first flight for debugging
-                if let first = json.first {
-                    print("\n=== SAMPLE FLIGHT JSON ===")
-                    print("Keys available: \(first.keys.sorted())")
-                    for (key, value) in first.sorted(by: { $0.key < $1.key }) {
-                        print("\(key): \(value)")
-                    }
-                    print("=== END SAMPLE ===\n")
-                }
-                
-                result = json.map { Flight(from: $0) }
-                print("Found \(result?.count ?? 0) flights")
+                let allFlights = json.map { Flight(from: $0) }
+                result = allFlights.filter { $0.isActualFlight }
+                print("Found \(result?.count ?? 0) actual flights")
             }
         } catch {
             print("JSON parse error: \(error)")
@@ -147,7 +147,7 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 func sendNotification(_ message: String) {
-    print("Sending: \(message)")
+    print("📲 \(message)")
     guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -177,8 +177,8 @@ if let previous = previousFlights {
     let newFlights = currentSet.subtracting(previousSet)
     for flight in newFlights {
         let time = formatDateTime(flight.start)
-        let aircraft = flight.aircraft ?? "Unknown aircraft"
-        let destination = flight.destination ?? flight.title ?? "Unknown destination"
+        let aircraft = flight.aircraft ?? "Unknown"
+        let destination = flight.destination ?? "Unknown"
         
         sendNotification("🛫 New flight: \(time) on \(aircraft) to \(destination)")
     }
@@ -193,22 +193,22 @@ if let previous = previousFlights {
             // Check if crew changed AND I'm now assigned
             if prevCrew != currentCrew && currentCrew.contains(myName) {
                 let time = formatDateTime(current.start)
-                let destination = current.destination ?? current.title ?? "Unknown destination"
+                let destination = current.destination ?? "Unknown"
                 let otherCrew = currentCrew.filter { $0 != myName }.sorted()
                 
                 if otherCrew.isEmpty {
-                    sendNotification("👥 You're assigned! \(time) to \(destination) (flying solo)")
+                    sendNotification("👨‍✈️ You're assigned! \(time) to \(destination) (solo)")
                 } else {
                     let crewList = otherCrew.joined(separator: ", ")
-                    sendNotification("👥 You're assigned! \(time) to \(destination) with \(crewList)")
+                    sendNotification("👨‍✈️ You're assigned! \(time) to \(destination) with \(crewList)")
                 }
             }
         }
     }
     
-    print("✓ Checked")
+    print("✓ Check complete")
 } else {
-    print("✓ First run")
+    print("✓ First run, saving baseline")
 }
 
 saveFlights(currentFlights)
