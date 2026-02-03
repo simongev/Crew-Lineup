@@ -206,8 +206,12 @@ if let previous = previousFlights {
         sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
     }
     
-    // Check for crew assignments
-    let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
+    // Check for crew assignments - build dictionary safely
+    var previousByID: [String: Flight] = [:]
+    for flight in previous {
+        previousByID[flight.id] = flight  // Overwrites duplicates
+    }
+    
     for current in currentFlights {
         if let prev = previousByID[current.id] {
             let prevCrewNames = Set(prev.crew?.map { $0.name } ?? [])
