@@ -20,8 +20,7 @@ jobs:
       
       - name: Check flights
         env:
-          PAGE_USERNAME: ${{ secrets.PAGE_USERNAME }}
-          PAGE_PASSWORD: ${{ secrets.PAGE_PASSWORD }}
+          SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}
         run: swift check-page.swift
       
       - name: Save data cache
