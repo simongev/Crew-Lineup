@@ -1,4 +1,4 @@
-name: Check Flights
+name: CrewLineup
 
 on:
   schedule:
