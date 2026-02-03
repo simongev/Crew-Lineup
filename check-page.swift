@@ -32,20 +32,15 @@ struct Flight: Codable, Hashable {
         self.start = dict["start"] as? String
         
         if let props = dict["extendedProps"] as? [String: Any] {
-            // Use the unique flight UUID, not the aircraft resourceId
             self.id = props["uuid"] as? String ?? UUID().uuidString
-            
             self.aircraft = props["aircraft"] as? String
             self.destination = props["destination_short"] as? String
             self.origin = props["origin_short"] as? String
             
-            // Extract full crew names with roles
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
                     guard let nameRaw = crewDict["name"] as? String,
                           let role = crewDict["role"] as? String else { return nil }
-                    
-                    // Clean HTML tags from name
                     let cleanName = nameRaw.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
                     return CrewMember(name: cleanName.trimmingCharacters(in: .whitespaces), role: role)
                 }
@@ -53,7 +48,6 @@ struct Flight: Codable, Hashable {
                 self.crew = nil
             }
             
-            // Only track actual flights
             let eventGroup = props["event_group"] as? String ?? ""
             self.isActualFlight = eventGroup == "customer_flight"
         } else {
@@ -82,30 +76,63 @@ func buildURL() -> String {
     return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
 }
 
-func fetchFlights() -> [Flight]? {
+func sendNotification(_ message: String) {
+    print("📲 \(message)")
+    guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = message.data(using: .utf8)
+    
+    let semaphore = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: request) { _, _, _ in
+        semaphore.signal()
+    }.resume()
+    semaphore.wait()
+}
+
+func fetchFlights(attempt: Int = 1) -> [Flight]? {
     let urlString = buildURL()
-    print("Fetching flights...")
+    print("Fetching flights (attempt \(attempt))...")
     
     guard let url = URL(string: urlString) else { return nil }
     
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 60
+    config.timeoutIntervalForResource = 120
+    let session = URLSession(configuration: config)
+    
     var request = URLRequest(url: url)
-    request.timeoutInterval = 30
     request.setValue("_app_session=\(sessionCookie)", forHTTPHeaderField: "Cookie")
     
     let semaphore = DispatchSemaphore(value: 0)
     var result: [Flight]?
+    var shouldRetry = false
+    var sessionExpired = false
     
-    URLSession.shared.dataTask(with: request) { data, response, error in
+    session.dataTask(with: request) { data, response, error in
         defer { semaphore.signal() }
         
         if let error = error {
             print("ERROR: \(error.localizedDescription)")
+            if attempt < 3 {
+                shouldRetry = true
+            }
             return
         }
         
         if let httpResponse = response as? HTTPURLResponse {
+            print("HTTP \(httpResponse.statusCode)")
+            
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                print("ERROR: Authentication failed")
+                sessionExpired = true
+                return
+            }
+            
             guard httpResponse.statusCode == 200 else {
-                print("ERROR: HTTP \(httpResponse.statusCode)")
+                if httpResponse.statusCode >= 500 && attempt < 3 {
+                    shouldRetry = true
+                }
                 return
             }
         }
@@ -114,7 +141,8 @@ func fetchFlights() -> [Flight]? {
         
         if let responseString = String(data: data, encoding: .utf8) {
             if responseString.contains("<!DOCTYPE html>") {
-                print("ERROR: Session expired, update SESSION_COOKIE secret")
+                print("ERROR: Got HTML instead of JSON - session expired")
+                sessionExpired = true
                 return
             }
         }
@@ -131,6 +159,18 @@ func fetchFlights() -> [Flight]? {
     }.resume()
     
     semaphore.wait()
+    
+    if sessionExpired {
+        sendNotification("⚠️ Session expired! Update SESSION_COOKIE in GitHub secrets")
+        return nil
+    }
+    
+    if shouldRetry {
+        print("Retrying in 5 seconds...")
+        sleep(5)
+        return fetchFlights(attempt: attempt + 1)
+    }
+    
     return result
 }
 
@@ -169,20 +209,6 @@ func saveFlights(_ flights: [Flight]) {
     }
 }
 
-func sendNotification(_ message: String) {
-    print("📲 \(message)")
-    guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = message.data(using: .utf8)
-    
-    let semaphore = DispatchSemaphore(value: 0)
-    URLSession.shared.dataTask(with: request) { _, _, _ in
-        semaphore.signal()
-    }.resume()
-    semaphore.wait()
-}
-
 print("=== Flight check ===")
 
 guard let currentFlights = fetchFlights() else {
@@ -196,7 +222,6 @@ if let previous = previousFlights {
     let previousSet = Set(previous)
     let currentSet = Set(currentFlights)
     
-    // Check for new flights
     let newFlights = currentSet.subtracting(previousSet)
     for flight in newFlights {
         let time = formatDateTime(flight.start)
@@ -206,10 +231,9 @@ if let previous = previousFlights {
         sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
     }
     
-    // Check for crew assignments - build dictionary safely
     var previousByID: [String: Flight] = [:]
     for flight in previous {
-        previousByID[flight.id] = flight  // Overwrites duplicates
+        previousByID[flight.id] = flight
     }
     
     for current in currentFlights {
@@ -217,7 +241,6 @@ if let previous = previousFlights {
             let prevCrewNames = Set(prev.crew?.map { $0.name } ?? [])
             let currentCrewNames = Set(current.crew?.map { $0.name } ?? [])
             
-            // Check if crew changed AND I'm now assigned
             let myFullName = current.crew?.first(where: { $0.name.contains(myLastName) })?.name
             
             if prevCrewNames != currentCrewNames && myFullName != nil {
