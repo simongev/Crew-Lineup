@@ -26,7 +26,7 @@ struct Flight: Codable, Hashable {
         self.id = dict["id"] as? String ?? UUID().uuidString
         self.title = dict["title"] as? String
         self.start = dict["start"] as? String
-        self.end = dict["end"] as? String
+        self.end = dict["end") as? String
         
         if let crewArray = dict["crew"] as? [[String: Any]] {
             self.crew = crewArray.compactMap { $0["name"] as? String }
@@ -44,14 +44,12 @@ let session = URLSession(configuration: config)
 
 func login() -> Bool {
     print("Attempting login...")
-    print("Username length: \(username.count)")
-    print("Password length: \(password.count)")
     
     guard let url = URL(string: loginURL) else { return false }
     
     let semaphore = DispatchSemaphore(value: 0)
     var csrfToken: String?
-    var htmlContent: String?
+    var formHTML: String?
     
     var getRequest = URLRequest(url: url)
     getRequest.httpMethod = "GET"
@@ -60,9 +58,7 @@ func login() -> Bool {
         defer { semaphore.signal() }
         
         if let data = data, let html = String(data: data, encoding: .utf8) {
-            htmlContent = html
-            
-            // Look for CSRF token
+            // Extract CSRF token
             if let range = html.range(of: "name=\"authenticity_token\"[^>]*value=\"([^\"]+)\"", options: .regularExpression) {
                 let match = String(html[range])
                 if let valueRange = match.range(of: "value=\"([^\"]+)\"", options: .regularExpression) {
@@ -71,44 +67,24 @@ func login() -> Bool {
                 }
             }
             
-            // Look for form fields
-            print("\n--- Form Analysis ---")
-            let emailPatterns = [
-                "name=\"user\\[email\\]\"",
-                "name=\"email\"",
-                "id=\"user_email\"",
-                "type=\"email\""
-            ]
-            
-            for pattern in emailPatterns {
-                if html.range(of: pattern, options: .regularExpression) != nil {
-                    print("Found email field pattern: \(pattern)")
-                }
+            // Extract the actual form
+            if let formStart = html.range(of: "<form[^>]*users/sign_in", options: .regularExpression),
+               let formEnd = html.range(of: "</form>", range: formStart.upperBound..<html.endIndex) {
+                formHTML = String(html[formStart.lowerBound..<formEnd.upperBound])
             }
-            
-            let passwordPatterns = [
-                "name=\"user\\[password\\]\"",
-                "name=\"password\"",
-                "id=\"user_password\"",
-                "type=\"password\""
-            ]
-            
-            for pattern in passwordPatterns {
-                if html.range(of: pattern, options: .regularExpression) != nil {
-                    print("Found password field pattern: \(pattern)")
-                }
-            }
-            print("---\n")
         }
     }.resume()
     
     semaphore.wait()
     
+    if let form = formHTML {
+        print("\n=== ACTUAL FORM HTML ===")
+        print(form)
+        print("=== END FORM ===\n")
+    }
+    
     guard let token = csrfToken else {
         print("Failed to extract CSRF token")
-        if let html = htmlContent {
-            print("HTML snippet: \(String(html.prefix(1000)))")
-        }
         return false
     }
     
@@ -129,8 +105,6 @@ func login() -> Bool {
     ]
     
     let bodyString = params.map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" }.joined(separator: "&")
-    
-    print("POST body (without password): authenticity_token=..&user[email]=\(username)&user[password]=***&commit=Sign+in")
     
     postRequest.httpBody = bodyString.data(using: .utf8)
     
@@ -156,16 +130,16 @@ func login() -> Bool {
                         print("ERROR: Still showing login form")
                     } else {
                         loginSuccess = true
-                        print("Login appears successful (no login form)")
+                        print("Login appears successful")
                     }
                 }
             }
         }
         
         if let cookies = HTTPCookieStorage.shared.cookies {
-            print("Cookies after login: \(cookies.count)")
+            print("Cookies: \(cookies.count)")
             for cookie in cookies {
-                print("  - \(cookie.name)")
+                print("  - \(cookie.name): \(cookie.value.prefix(20))...")
             }
         }
     }.resume()
@@ -212,15 +186,11 @@ func fetchFlights() -> [Flight]? {
         
         if let httpResponse = response as? HTTPURLResponse {
             print("HTTP Status: \(httpResponse.statusCode)")
-            let contentType = httpResponse.allHeaderFields["Content-Type"] as? String ?? "unknown"
-            print("Content-Type: \(contentType)")
         }
         
         guard let data = data else { return }
         
         if let responseString = String(data: data, encoding: .utf8) {
-            print("Response length: \(responseString.count) characters")
-            
             if responseString.contains("<!DOCTYPE html>") {
                 print("ERROR: Got HTML instead of JSON")
                 return
@@ -256,7 +226,6 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 func sendNotification(_ message: String) {
-    print("Sending notification: \(message)")
     guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -272,7 +241,7 @@ func sendNotification(_ message: String) {
 print("=== Starting flight check ===")
 
 guard login() else {
-    print("FATAL: Login failed - check credentials in GitHub Secrets")
+    print("FATAL: Login failed")
     exit(1)
 }
 
