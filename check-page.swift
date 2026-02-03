@@ -10,14 +10,19 @@ let aircraftUUIDs = [
 ]
 let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
 let dataFile = "flights-data.json"
-let myName = "Simon" // CHANGE THIS to your last name as it appears in crew_last_names
+let myLastName = "Simon" // CHANGE THIS to your last name
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
+
+struct CrewMember: Codable, Hashable {
+    let name: String
+    let role: String
+}
 
 struct Flight: Codable, Hashable {
     let id: String
     let start: String?
-    let crew: [String]?
+    let crew: [CrewMember]?
     let aircraft: String?
     let destination: String?
     let origin: String?
@@ -32,14 +37,21 @@ struct Flight: Codable, Hashable {
             self.destination = props["destination_short"] as? String
             self.origin = props["origin_short"] as? String
             
-            // Extract crew last names (cleaner than full names with HTML)
-            if let crewLastNames = props["crew_last_names"] as? [String] {
-                self.crew = crewLastNames
+            // Extract full crew names with roles
+            if let crewArray = props["crew"] as? [[String: Any]] {
+                self.crew = crewArray.compactMap { crewDict in
+                    guard let nameRaw = crewDict["name"] as? String,
+                          let role = crewDict["role"] as? String else { return nil }
+                    
+                    // Clean HTML tags from name
+                    let cleanName = nameRaw.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                    return CrewMember(name: cleanName.trimmingCharacters(in: .whitespaces), role: role)
+                }
             } else {
                 self.crew = nil
             }
             
-            // Only track actual flights, not maintenance/calendar items
+            // Only track actual flights
             let eventGroup = props["event_group"] as? String ?? ""
             self.isActualFlight = eventGroup == "customer_flight"
         } else {
@@ -123,13 +135,21 @@ func formatDateTime(_ isoString: String?) -> String {
     guard let isoString = isoString else { return "Unknown time" }
     
     let formatter = ISO8601DateFormatter()
-    if let date = formatter.date(from: isoString) {
-        let displayFormatter = DateFormatter()
-        displayFormatter.dateFormat = "MMM d 'at' h:mm a"
-        displayFormatter.timeZone = TimeZone(identifier: "America/New_York")
-        return displayFormatter.string(from: date)
+    guard let date = formatter.date(from: isoString) else { return isoString }
+    
+    let calendar = Calendar.current
+    let now = Date()
+    
+    let displayFormatter = DateFormatter()
+    displayFormatter.timeZone = TimeZone(identifier: "America/New_York")
+    
+    if calendar.isDateInToday(date) {
+        displayFormatter.dateFormat = "'today at' HH:mm"
+    } else {
+        displayFormatter.dateFormat = "MMM d 'at' HH:mm"
     }
-    return isoString
+    
+    return displayFormatter.string(from: date)
 }
 
 func loadPreviousFlights() -> [Flight]? {
@@ -178,29 +198,31 @@ if let previous = previousFlights {
     for flight in newFlights {
         let time = formatDateTime(flight.start)
         let aircraft = flight.aircraft ?? "Unknown"
-        let destination = flight.destination ?? "Unknown"
+        let route = "\(flight.origin ?? "?") - \(flight.destination ?? "?")"
         
-        sendNotification("🛫 New flight: \(time) on \(aircraft) to \(destination)")
+        sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
     }
     
     // Check for crew assignments
     let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
     for current in currentFlights {
         if let prev = previousByID[current.id] {
-            let prevCrew = Set(prev.crew ?? [])
-            let currentCrew = Set(current.crew ?? [])
+            let prevCrewNames = Set(prev.crew?.map { $0.name } ?? [])
+            let currentCrewNames = Set(current.crew?.map { $0.name } ?? [])
             
             // Check if crew changed AND I'm now assigned
-            if prevCrew != currentCrew && currentCrew.contains(myName) {
+            let myFullName = current.crew?.first(where: { $0.name.contains(myLastName) })?.name
+            
+            if prevCrewNames != currentCrewNames && myFullName != nil {
                 let time = formatDateTime(current.start)
-                let destination = current.destination ?? "Unknown"
-                let otherCrew = currentCrew.filter { $0 != myName }.sorted()
+                let route = "\(current.origin ?? "?") - \(current.destination ?? "?")"
+                let otherPilots = current.crew?.filter { !$0.name.contains(myLastName) }.map { $0.name } ?? []
                 
-                if otherCrew.isEmpty {
-                    sendNotification("👨‍✈️ You're assigned! \(time) to \(destination) (solo)")
+                if otherPilots.isEmpty {
+                    sendNotification("👨‍✈️ You're assigned! \(time) \(route) (solo)")
                 } else {
-                    let crewList = otherCrew.joined(separator: ", ")
-                    sendNotification("👨‍✈️ You're assigned! \(time) to \(destination) with \(crewList)")
+                    let crewList = otherPilots.joined(separator: ", ")
+                    sendNotification("👨‍✈️ You're assigned! \(time) \(route) with \(crewList)")
                 }
             }
         }
