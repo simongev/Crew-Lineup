@@ -80,15 +80,27 @@ func fetchFlights() -> [Flight]? {
         
         if let httpResponse = response as? HTTPURLResponse {
             print("HTTP Status: \(httpResponse.statusCode)")
+            print("Content-Type: \(httpResponse.allHeaderFields["Content-Type"] ?? "unknown")")
             guard httpResponse.statusCode == 200 else { return }
         }
         
-        guard let data = data else { return }
+        guard let data = data else {
+            print("ERROR: No data received")
+            return
+        }
+        
+        // Log the actual response
+        if let responseString = String(data: data, encoding: .utf8) {
+            print("Response length: \(responseString.count) characters")
+            print("First 500 chars: \(String(responseString.prefix(500)))")
+        }
         
         do {
             if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                 result = json.map { Flight(from: $0) }
                 print("Found \(result?.count ?? 0) flights")
+            } else {
+                print("ERROR: JSON is not an array")
             }
         } catch {
             print("JSON parse error: \(error)")
