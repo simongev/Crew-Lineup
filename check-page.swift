@@ -10,6 +10,7 @@ let aircraftUUIDs = [
 ]
 let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
 let dataFile = "flights-data.json"
+let myName = "Gev Simon" // CHANGE THIS to your name as it appears in crew list
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
@@ -19,6 +20,9 @@ struct Flight: Codable, Hashable {
     let start: String?
     let end: String?
     let crew: [String]?
+    let aircraft: String?
+    let destination: String?
+    let departure: String?
     
     init(from dict: [String: Any]) {
         self.id = dict["id"] as? String ?? UUID().uuidString
@@ -26,11 +30,17 @@ struct Flight: Codable, Hashable {
         self.start = dict["start"] as? String
         self.end = dict["end"] as? String
         
+        // Extract crew names
         if let crewArray = dict["crew"] as? [[String: Any]] {
             self.crew = crewArray.compactMap { $0["name"] as? String }
         } else {
             self.crew = nil
         }
+        
+        // Try to extract aircraft/destination info
+        self.aircraft = dict["aircraft"] as? String ?? dict["tail_number"] as? String
+        self.destination = dict["destination"] as? String ?? dict["arrival_airport"] as? String
+        self.departure = dict["departure"] as? String ?? dict["departure_airport"] as? String
     }
 }
 
@@ -87,6 +97,16 @@ func fetchFlights() -> [Flight]? {
         
         do {
             if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                // Print first flight for debugging
+                if let first = json.first {
+                    print("\n=== SAMPLE FLIGHT JSON ===")
+                    print("Keys available: \(first.keys.sorted())")
+                    for (key, value) in first.sorted(by: { $0.key < $1.key }) {
+                        print("\(key): \(value)")
+                    }
+                    print("=== END SAMPLE ===\n")
+                }
+                
                 result = json.map { Flight(from: $0) }
                 print("Found \(result?.count ?? 0) flights")
             }
@@ -97,6 +117,19 @@ func fetchFlights() -> [Flight]? {
     
     semaphore.wait()
     return result
+}
+
+func formatDateTime(_ isoString: String?) -> String {
+    guard let isoString = isoString else { return "Unknown time" }
+    
+    let formatter = ISO8601DateFormatter()
+    if let date = formatter.date(from: isoString) {
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "MMM d 'at' h:mm a"
+        displayFormatter.timeZone = TimeZone(identifier: "America/New_York")
+        return displayFormatter.string(from: date)
+    }
+    return isoString
 }
 
 func loadPreviousFlights() -> [Flight]? {
@@ -140,23 +173,35 @@ if let previous = previousFlights {
     let previousSet = Set(previous)
     let currentSet = Set(currentFlights)
     
+    // Check for new flights
     let newFlights = currentSet.subtracting(previousSet)
     for flight in newFlights {
-        let title = flight.title ?? "Unknown"
-        let start = flight.start ?? "Unknown time"
-        sendNotification("🛫 New flight: \(title) at \(start)")
+        let time = formatDateTime(flight.start)
+        let aircraft = flight.aircraft ?? "Unknown aircraft"
+        let destination = flight.destination ?? flight.title ?? "Unknown destination"
+        
+        sendNotification("🛫 New flight: \(time) on \(aircraft) to \(destination)")
     }
     
+    // Check for crew assignments
     let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
     for current in currentFlights {
         if let prev = previousByID[current.id] {
             let prevCrew = Set(prev.crew ?? [])
             let currentCrew = Set(current.crew ?? [])
             
-            if prevCrew != currentCrew && !currentCrew.isEmpty {
-                let crewList = currentCrew.sorted().joined(separator: ", ")
-                let title = current.title ?? "Flight"
-                sendNotification("👥 Crew assigned to \(title): \(crewList)")
+            // Check if crew changed AND I'm now assigned
+            if prevCrew != currentCrew && currentCrew.contains(myName) {
+                let time = formatDateTime(current.start)
+                let destination = current.destination ?? current.title ?? "Unknown destination"
+                let otherCrew = currentCrew.filter { $0 != myName }.sorted()
+                
+                if otherCrew.isEmpty {
+                    sendNotification("👥 You're assigned! \(time) to \(destination) (flying solo)")
+                } else {
+                    let crewList = otherCrew.joined(separator: ", ")
+                    sendNotification("👥 You're assigned! \(time) to \(destination) with \(crewList)")
+                }
             }
         }
     }
