@@ -224,7 +224,6 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
-sendNotification("✅ Flight checker is running")
 
 guard let currentFlights = fetchFlights() else {
     print("FATAL: Failed to fetch flights")
