@@ -2,7 +2,6 @@
 
 import Foundation
 
-let loginURL = "https://portal.jetinsight.com/users/sign_in"
 let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
 let aircraftUUIDs = [
     "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
@@ -12,8 +11,7 @@ let aircraftUUIDs = [
 let ntfyTopic = "notify.sh/CrewLineup" // CHANGE THIS
 let dataFile = "flights-data.json"
 
-let username = ProcessInfo.processInfo.environment["PAGE_USERNAME"] ?? ""
-let password = ProcessInfo.processInfo.environment["PAGE_PASSWORD"] ?? ""
+let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
 struct Flight: Codable, Hashable {
     let id: String
@@ -34,119 +32,6 @@ struct Flight: Codable, Hashable {
             self.crew = nil
         }
     }
-}
-
-let config = URLSessionConfiguration.default
-config.httpCookieAcceptPolicy = .always
-config.httpShouldSetCookies = true
-config.httpCookieStorage = HTTPCookieStorage.shared
-let session = URLSession(configuration: config)
-
-func login() -> Bool {
-    print("Attempting login...")
-    
-    guard let url = URL(string: loginURL) else { return false }
-    
-    let semaphore = DispatchSemaphore(value: 0)
-    var csrfToken: String?
-    var formHTML: String?
-    
-    var getRequest = URLRequest(url: url)
-    getRequest.httpMethod = "GET"
-    
-    session.dataTask(with: getRequest) { data, response, error in
-        defer { semaphore.signal() }
-        
-        if let data = data, let html = String(data: data, encoding: .utf8) {
-            // Extract CSRF token
-            if let range = html.range(of: "name=\"authenticity_token\"[^>]*value=\"([^\"]+)\"", options: .regularExpression) {
-                let match = String(html[range])
-                if let valueRange = match.range(of: "value=\"([^\"]+)\"", options: .regularExpression) {
-                    let valueMatch = String(match[valueRange])
-                    csrfToken = valueMatch.replacingOccurrences(of: "value=\"", with: "").replacingOccurrences(of: "\"", with: "")
-                }
-            }
-            
-            // Extract the actual form
-            if let formStart = html.range(of: "<form[^>]*users/sign_in", options: .regularExpression),
-               let formEnd = html.range(of: "</form>", range: formStart.upperBound..<html.endIndex) {
-                formHTML = String(html[formStart.lowerBound..<formEnd.upperBound])
-            }
-        }
-    }.resume()
-    
-    semaphore.wait()
-    
-    if let form = formHTML {
-        print("\n=== ACTUAL FORM HTML ===")
-        print(form)
-        print("=== END FORM ===\n")
-    }
-    
-    guard let token = csrfToken else {
-        print("Failed to extract CSRF token")
-        return false
-    }
-    
-    print("CSRF token: \(token.prefix(20))...")
-    
-    // Submit login
-    var postRequest = URLRequest(url: url)
-    postRequest.httpMethod = "POST"
-    postRequest.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-    postRequest.setValue(loginURL, forHTTPHeaderField: "Referer")
-    postRequest.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
-    
-    let params = [
-        "authenticity_token": token,
-        "user[email]": username,
-        "user[password]": password,
-        "commit": "Sign in"
-    ]
-    
-    let bodyString = params.map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" }.joined(separator: "&")
-    
-    postRequest.httpBody = bodyString.data(using: .utf8)
-    
-    var loginSuccess = false
-    let loginSemaphore = DispatchSemaphore(value: 0)
-    
-    session.dataTask(with: postRequest) { data, response, error in
-        defer { loginSemaphore.signal() }
-        
-        if let httpResponse = response as? HTTPURLResponse {
-            print("Login POST status: \(httpResponse.statusCode)")
-            
-            if httpResponse.statusCode == 302 || httpResponse.statusCode == 303 {
-                if let location = httpResponse.allHeaderFields["Location"] as? String {
-                    print("Redirected to: \(location)")
-                }
-                loginSuccess = true
-            } else if httpResponse.statusCode == 200 {
-                if let data = data, let html = String(data: data, encoding: .utf8) {
-                    if html.contains("Invalid Email or password") {
-                        print("ERROR: Invalid credentials message found")
-                    } else if html.contains("user[email]") || html.contains("sign_in") {
-                        print("ERROR: Still showing login form")
-                    } else {
-                        loginSuccess = true
-                        print("Login appears successful")
-                    }
-                }
-            }
-        }
-        
-        if let cookies = HTTPCookieStorage.shared.cookies {
-            print("Cookies: \(cookies.count)")
-            for cookie in cookies {
-                print("  - \(cookie.name): \(cookie.value.prefix(20))...")
-            }
-        }
-    }.resume()
-    
-    loginSemaphore.wait()
-    
-    return loginSuccess
 }
 
 func buildURL() -> String {
@@ -172,11 +57,12 @@ func fetchFlights() -> [Flight]? {
     
     var request = URLRequest(url: url)
     request.timeoutInterval = 30
+    request.setValue("_app_session=\(sessionCookie)", forHTTPHeaderField: "Cookie")
     
     let semaphore = DispatchSemaphore(value: 0)
     var result: [Flight]?
     
-    session.dataTask(with: request) { data, response, error in
+    URLSession.shared.dataTask(with: request) { data, response, error in
         defer { semaphore.signal() }
         
         if let error = error {
@@ -191,8 +77,10 @@ func fetchFlights() -> [Flight]? {
         guard let data = data else { return }
         
         if let responseString = String(data: data, encoding: .utf8) {
+            print("Response length: \(responseString.count) chars")
+            
             if responseString.contains("<!DOCTYPE html>") {
-                print("ERROR: Got HTML instead of JSON")
+                print("ERROR: Got HTML - session expired, update SESSION_COOKIE")
                 return
             }
         }
@@ -226,6 +114,7 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 func sendNotification(_ message: String) {
+    print("Sending: \(message)")
     guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else { return }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -238,14 +127,7 @@ func sendNotification(_ message: String) {
     semaphore.wait()
 }
 
-print("=== Starting flight check ===")
-
-guard login() else {
-    print("FATAL: Login failed")
-    exit(1)
-}
-
-print("✓ Login successful")
+print("=== Flight check ===")
 
 guard let currentFlights = fetchFlights() else {
     print("FATAL: Failed to fetch flights")
@@ -279,9 +161,9 @@ if let previous = previousFlights {
         }
     }
     
-    print("✓ Comparison complete")
+    print("✓ Checked")
 } else {
-    print("✓ First run, saving initial data")
+    print("✓ First run")
 }
 
 saveFlights(currentFlights)
