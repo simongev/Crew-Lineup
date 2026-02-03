@@ -29,10 +29,12 @@ struct Flight: Codable, Hashable {
     let isActualFlight: Bool
     
     init(from dict: [String: Any]) {
-        self.id = dict["resourceId"] as? String ?? UUID().uuidString
         self.start = dict["start"] as? String
         
         if let props = dict["extendedProps"] as? [String: Any] {
+            // Use the unique flight UUID, not the aircraft resourceId
+            self.id = props["uuid"] as? String ?? UUID().uuidString
+            
             self.aircraft = props["aircraft"] as? String
             self.destination = props["destination_short"] as? String
             self.origin = props["origin_short"] as? String
@@ -55,6 +57,7 @@ struct Flight: Codable, Hashable {
             let eventGroup = props["event_group"] as? String ?? ""
             self.isActualFlight = eventGroup == "customer_flight"
         } else {
+            self.id = UUID().uuidString
             self.aircraft = nil
             self.destination = nil
             self.origin = nil
