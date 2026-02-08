@@ -234,6 +234,15 @@ func buildFullRoute(for flights: [Flight]) -> String {
     return route.joined(separator: " - ")
 }
 
+func groupByLocator(_ flights: [Flight]) -> [String: [Flight]] {
+    var grouped: [String: [Flight]] = [:]
+    for flight in flights {
+        let key = flight.locator ?? flight.id
+        grouped[key, default: []].append(flight)
+    }
+    return grouped
+}
+
 func loadPreviousFlights() -> [Flight]? {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: dataFile)),
           let flights = try? JSONDecoder().decode([Flight].self, from: data) else {
@@ -261,21 +270,13 @@ if let previous = previousFlights {
     let previousSet = Set(previous)
     let currentSet = Set(currentFlights)
     
-    // Group by locator for new flights
-    var newFlightsByLocator: [String: [Flight]] = [:]
+    // New flights - group by locator
     let newFlights = currentSet.subtracting(previousSet)
+    let newFlightsByLocator = groupByLocator(Array(newFlights))
     
-    for flight in newFlights {
-        if let locator = flight.locator, !locator.isEmpty {
-            newFlightsByLocator[locator, default: []].append(flight)
-        } else {
-            newFlightsByLocator[flight.id, default: []].append(flight)
-        }
-    }
-    
-    // Send notification for each locator group
     for (_, flights) in newFlightsByLocator {
-        guard let firstFlight = flights.first else { continue }
+        let sorted = flights.sorted { ($0.start ?? "") < ($1.start ?? "") }
+        guard let firstFlight = sorted.first else { continue }
         
         let time = formatDateTime(firstFlight.start)
         let aircraft = firstFlight.aircraft ?? "Unknown"
@@ -284,39 +285,40 @@ if let previous = previousFlights {
         sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
     }
     
-    // Crew change detection
-    var previousByID: [String: Flight] = [:]
-    for flight in previous {
-        previousByID[flight.id] = flight
-    }
+    // Crew changes - group by locator
+    let previousByLocator = groupByLocator(previous)
+    let currentByLocator = groupByLocator(currentFlights)
     
-    for current in currentFlights {
-        if let prev = previousByID[current.id] {
-            let prevCrewNames = Set(prev.crew?.map { $0.name } ?? [])
-            let currentCrewNames = Set(current.crew?.map { $0.name } ?? [])
+    for (locator, currentLegs) in currentByLocator {
+        guard let previousLegs = previousByLocator[locator] else { continue }
+        
+        let prevCrewSet = Set(previousLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+        let currCrewSet = Set(currentLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+        
+        if prevCrewSet != currCrewSet && !currCrewSet.isEmpty {
+            let sorted = currentLegs.sorted { ($0.start ?? "") < ($1.start ?? "") }
+            guard let firstFlight = sorted.first else { continue }
             
-            if prevCrewNames != currentCrewNames && current.crew?.isEmpty == false {
-                let time = formatDateTime(current.start)
-                let route = "\(current.origin ?? "?") - \(current.destination ?? "?")"
-                
-                let pic = current.crew?.first(where: { $0.role.lowercased().contains("pic") })
-                let sic = current.crew?.first(where: { $0.role.lowercased().contains("sic") })
-                
-                var crewText = ""
-                if let picName = pic?.name {
-                    crewText += "PIC: \(getFirstName(picName))"
-                }
-                if let sicName = sic?.name {
-                    if !crewText.isEmpty { crewText += ", " }
-                    crewText += "SIC: \(getFirstName(sicName))"
-                }
-                
-                if crewText.isEmpty {
-                    crewText = current.crew?.map { getFirstName($0.name) }.joined(separator: ", ") ?? ""
-                }
-                
-                sendNotification("👨‍✈️ Crew assigned: \(crewText) - \(time) \(route)")
+            let time = formatDateTime(firstFlight.start)
+            let route = buildFullRoute(for: currentLegs)
+            
+            let pic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("pic") })
+            let sic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("sic") })
+            
+            var crewText = ""
+            if let picName = pic?.name {
+                crewText += "PIC: \(getFirstName(picName))"
             }
+            if let sicName = sic?.name {
+                if !crewText.isEmpty { crewText += ", " }
+                crewText += "SIC: \(getFirstName(sicName))"
+            }
+            
+            if crewText.isEmpty {
+                crewText = firstFlight.crew?.map { getFirstName($0.name) }.joined(separator: ", ") ?? ""
+            }
+            
+            sendNotification("👨‍✈️ Crew assigned: \(crewText) - \(time) \(route)")
         }
     }
     
