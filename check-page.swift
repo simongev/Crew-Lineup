@@ -10,7 +10,7 @@ let aircraftUUIDs = [
 ]
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
-let myLastName = "Simon"
+let myLastName = "Navon"
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
@@ -163,4 +163,182 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
         
         guard let data = data else { return }
         
-        if let responseStri
+        if let responseString = String(data: data, encoding: .utf8) {
+            if responseString.contains("<!DOCTYPE html>") {
+                print("ERROR: Got HTML instead of JSON - session expired")
+                sessionExpired = true
+                return
+            }
+        }
+        
+        do {
+            if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                let allFlights = json.map { Flight(from: $0) }
+                result = allFlights.filter { $0.isActualFlight }
+                print("Found \(result?.count ?? 0) actual flights")
+            }
+        } catch {
+            print("JSON parse error: \(error)")
+        }
+    }.resume()
+    
+    semaphore.wait()
+    
+    if sessionExpired {
+        sendNotification("⚠️ Session expired! Update SESSION_COOKIE in GitHub secrets")
+        return nil
+    }
+    
+    if shouldRetry {
+        print("Retrying in 5 seconds...")
+        sleep(5)
+        return fetchFlights(attempt: attempt + 1)
+    }
+    
+    return result
+}
+
+func formatDateTime(_ isoString: String?) -> String {
+    guard let isoString = isoString else { return "Unknown time" }
+    
+    let formatter = ISO8601DateFormatter()
+    guard let date = formatter.date(from: isoString) else { return isoString }
+    
+    let calendar = Calendar.current
+    let now = Date()
+    
+    let displayFormatter = DateFormatter()
+    displayFormatter.timeZone = TimeZone(identifier: "America/New_York")
+    
+    if calendar.isDateInToday(date) {
+        displayFormatter.dateFormat = "'today at' HH:mm"
+    } else {
+        displayFormatter.dateFormat = "MMM d 'at' HH:mm"
+    }
+    
+    return displayFormatter.string(from: date)
+}
+
+func getFirstName(_ fullName: String) -> String {
+    return fullName.components(separatedBy: " ").first ?? fullName
+}
+
+func buildFullRoute(for flights: [Flight]) -> String {
+    let sorted = flights.sorted { ($0.start ?? "") < ($1.start ?? "") }
+    var route: [String] = []
+    
+    for flight in sorted {
+        if let origin = flight.origin {
+            if route.isEmpty || route.last != origin {
+                route.append(origin)
+            }
+        }
+        if let dest = flight.destination {
+            route.append(dest)
+        }
+    }
+    
+    return route.joined(separator: " - ")
+}
+
+func groupByLocator(_ flights: [Flight]) -> [String: [Flight]] {
+    var grouped: [String: [Flight]] = [:]
+    for flight in flights {
+        let key = flight.locator ?? flight.id
+        grouped[key, default: []].append(flight)
+    }
+    return grouped
+}
+
+func loadPreviousFlights() -> [Flight]? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: dataFile)),
+          let flights = try? JSONDecoder().decode([Flight].self, from: data) else {
+        return nil
+    }
+    return flights
+}
+
+func saveFlights(_ flights: [Flight]) {
+    if let data = try? JSONEncoder().encode(flights) {
+        try? data.write(to: URL(fileURLWithPath: dataFile))
+    }
+}
+
+print("=== Flight check ===")
+
+guard let currentFlights = fetchFlights() else {
+    print("FATAL: Failed to fetch flights")
+    exit(1)
+}
+
+// Filter out past flights
+let upcomingFlights = currentFlights.filter { !$0.isPast() }
+print("Found \(upcomingFlights.count) upcoming flights (filtered out past)")
+
+let previousFlights = loadPreviousFlights()
+
+if let previous = previousFlights {
+    // Also filter past flights from previous data
+    let previousUpcoming = previous.filter { !$0.isPast() }
+    
+    let previousSet = Set(previousUpcoming)
+    let currentSet = Set(upcomingFlights)
+    
+    // New flights - group by locator
+    let newFlights = currentSet.subtracting(previousSet)
+    let newFlightsByLocator = groupByLocator(Array(newFlights))
+    
+    for (_, flights) in newFlightsByLocator {
+        let sorted = flights.sorted { ($0.start ?? "") < ($1.start ?? "") }
+        guard let firstFlight = sorted.first else { continue }
+        
+        let time = formatDateTime(firstFlight.start)
+        let aircraft = firstFlight.aircraft ?? "Unknown"
+        let route = buildFullRoute(for: flights)
+        
+        sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
+    }
+    
+    // Crew changes - group by locator
+    let previousByLocator = groupByLocator(previousUpcoming)
+    let currentByLocator = groupByLocator(upcomingFlights)
+    
+    for (locator, currentLegs) in currentByLocator {
+        guard let previousLegs = previousByLocator[locator] else { continue }
+        
+        let prevCrewSet = Set(previousLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+        let currCrewSet = Set(currentLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+        
+        if prevCrewSet != currCrewSet && !currCrewSet.isEmpty {
+            let sorted = currentLegs.sorted { ($0.start ?? "") < ($1.start ?? "") }
+            guard let firstFlight = sorted.first else { continue }
+            
+            let time = formatDateTime(firstFlight.start)
+            let route = buildFullRoute(for: currentLegs)
+            
+            let pic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("pic") })
+            let sic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("sic") })
+            
+            var crewText = ""
+            if let picName = pic?.name {
+                crewText += "PIC: \(getFirstName(picName))"
+            }
+            if let sicName = sic?.name {
+                if !crewText.isEmpty { crewText += ", " }
+                crewText += "SIC: \(getFirstName(sicName))"
+            }
+            
+            if crewText.isEmpty {
+                crewText = firstFlight.crew?.map { getFirstName($0.name) }.joined(separator: ", ") ?? ""
+            }
+            
+            sendNotification("👨‍✈️ Crew assigned: \(crewText) - \(time) \(route)")
+        }
+    }
+    
+    print("✓ Check complete")
+} else {
+    print("✓ First run, saving baseline")
+}
+
+saveFlights(upcomingFlights)
