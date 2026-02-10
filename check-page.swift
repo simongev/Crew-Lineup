@@ -10,7 +10,7 @@ let aircraftUUIDs = [
 ]
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
-let myLastName = "Navon"
+let myLastName = "Simon"
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
