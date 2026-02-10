@@ -14,4 +14,4 @@ jobs:
       - name: Run flight checker
         env:
           SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}
-        run: swift check-flights.swift
+        run: swift check-page.swift
