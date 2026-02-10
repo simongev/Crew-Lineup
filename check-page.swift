@@ -86,116 +86,79 @@ func buildURL() -> String {
     return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
 }
 
+func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
+    let task = Process()
+    task.launchPath = "/bin/bash"
+    task.arguments = ["-c", command]
+    
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = pipe
+    task.launch()
+    task.waitUntilExit()
+    
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    let output = String(data: data, encoding: .utf8) ?? ""
+    
+    return (output, task.terminationStatus)
+}
+
 func sendNotification(_ message: String) {
-    print("📲 Sending to topic: '\(ntfyTopic)'")
-    print("📲 Message: \(message)")
+    print("📲 Sending notification: \(message)")
     
-    guard let url = URL(string: "https://ntfy.sh/\(ntfyTopic)") else {
-        print("ERROR: Invalid ntfy URL")
-        return
+    let escapedMessage = message.replacingOccurrences(of: "'", with: "'\\''")
+    let command = "curl -s -d '\(escapedMessage)' https://ntfy.sh/\(ntfyTopic)"
+    
+    let result = runCommand(command)
+    if result.exitCode == 0 {
+        print("📲 Notification sent successfully")
+    } else {
+        print("📲 Notification error: \(result.output)")
     }
-    
-    print("📲 URL: \(url.absoluteString)")
-    
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = message.data(using: .utf8)
-    
-    let semaphore = DispatchSemaphore(value: 0)
-    URLSession.shared.dataTask(with: request) { data, response, error in
-        if let error = error {
-            print("📲 Notification error: \(error.localizedDescription)")
-        }
-        if let httpResponse = response as? HTTPURLResponse {
-            print("📲 Notification response: \(httpResponse.statusCode)")
-        }
-        semaphore.signal()
-    }.resume()
-    semaphore.wait()
 }
 
 func fetchFlights(attempt: Int = 1) -> [Flight]? {
     let urlString = buildURL()
     print("Fetching flights (attempt \(attempt))...")
     
-    guard let url = URL(string: urlString) else { return nil }
+    let command = "curl -s -H 'Cookie: _app_session=\(sessionCookie)' '\(urlString)'"
+    let result = runCommand(command)
     
-    let config = URLSessionConfiguration.default
-    config.timeoutIntervalForRequest = 60
-    config.timeoutIntervalForResource = 120
-    let session = URLSession(configuration: config)
-    
-    var request = URLRequest(url: url)
-    request.setValue("_app_session=\(sessionCookie)", forHTTPHeaderField: "Cookie")
-    
-    let semaphore = DispatchSemaphore(value: 0)
-    var result: [Flight]?
-    var shouldRetry = false
-    var sessionExpired = false
-    
-    session.dataTask(with: request) { data, response, error in
-        defer { semaphore.signal() }
-        
-        if let error = error {
-            print("ERROR: \(error.localizedDescription)")
-            if attempt < 3 {
-                shouldRetry = true
-            }
-            return
+    if result.exitCode != 0 {
+        print("ERROR: curl failed with exit code \(result.exitCode)")
+        if attempt < 3 {
+            print("Retrying in 5 seconds...")
+            sleep(5)
+            return fetchFlights(attempt: attempt + 1)
         }
-        
-        if let httpResponse = response as? HTTPURLResponse {
-            print("HTTP \(httpResponse.statusCode)")
-            
-            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
-                print("ERROR: Authentication failed")
-                sessionExpired = true
-                return
-            }
-            
-            guard httpResponse.statusCode == 200 else {
-                if httpResponse.statusCode >= 500 && attempt < 3 {
-                    shouldRetry = true
-                }
-                return
-            }
-        }
-        
-        guard let data = data else { return }
-        
-        if let responseString = String(data: data, encoding: .utf8) {
-            if responseString.contains("<!DOCTYPE html>") {
-                print("ERROR: Got HTML instead of JSON - session expired")
-                sessionExpired = true
-                return
-            }
-        }
-        
-        do {
-            if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                let allFlights = json.map { Flight(from: $0) }
-                result = allFlights.filter { $0.isActualFlight }
-                print("Found \(result?.count ?? 0) actual flights")
-            }
-        } catch {
-            print("JSON parse error: \(error)")
-        }
-    }.resume()
+        return nil
+    }
     
-    semaphore.wait()
+    let data = result.output.data(using: .utf8) ?? Data()
     
-    if sessionExpired {
+    if result.output.contains("<!DOCTYPE html>") {
+        print("ERROR: Got HTML instead of JSON - session expired")
         sendNotification("⚠️ Session expired! Update SESSION_COOKIE in GitHub secrets")
         return nil
     }
     
-    if shouldRetry {
-        print("Retrying in 5 seconds...")
-        sleep(5)
-        return fetchFlights(attempt: attempt + 1)
+    do {
+        if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            let allFlights = json.map { Flight(from: $0) }
+            let flights = allFlights.filter { $0.isActualFlight }
+            print("Found \(flights.count) actual flights")
+            return flights
+        }
+    } catch {
+        print("JSON parse error: \(error)")
+        if attempt < 3 {
+            print("Retrying in 5 seconds...")
+            sleep(5)
+            return fetchFlights(attempt: attempt + 1)
+        }
     }
     
-    return result
+    return nil
 }
 
 func formatDateTime(_ isoString: String?) -> String {
@@ -205,7 +168,6 @@ func formatDateTime(_ isoString: String?) -> String {
     guard let date = formatter.date(from: isoString) else { return isoString }
     
     let calendar = Calendar.current
-    let now = Date()
     
     let displayFormatter = DateFormatter()
     displayFormatter.timeZone = TimeZone(identifier: "America/New_York")
