@@ -214,7 +214,6 @@ guard let currentFlights = fetchFlights() else {
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
 print("Upcoming: \(upcomingFlights.count)")
 
-// Debug: Show all locators
 print("\n📋 Current locators:")
 for (locator, legs) in groupByLocator(upcomingFlights) {
     let route = buildFullRoute(for: legs)
@@ -231,7 +230,6 @@ let previousUpcoming = previous.filter { !$0.isPast() }
 let previousSet = Set(previousUpcoming)
 let currentSet = Set(upcomingFlights)
 
-// New flights - ONE notification per locator
 print("\n🆕 Checking for new flights...")
 let newFlights = currentSet.subtracting(previousSet)
 let newFlightsByLocator = groupByLocator(Array(newFlights))
@@ -256,7 +254,6 @@ for (locator, flights) in newFlightsByLocator {
     sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
 }
 
-// Crew changes - ONE notification per locator
 print("\n👥 Checking for crew changes...")
 let previousByLocator = groupByLocator(previousUpcoming)
 let currentByLocator = groupByLocator(upcomingFlights)
@@ -301,40 +298,3 @@ print("   Found \(crewChanges) crew change(s)")
 
 saveFlights(upcomingFlights)
 print("\n✓ Done")
-```
-
-**What this debug output shows:**
-```
-=== Flight check ===
-Found 6 actual flights
-
-Upcoming: 6
-
-📋 Current locators:
-   ABC123: 3 leg(s) - TEB - BNA - MKE - TEB
-   XYZ789: 2 leg(s) - TEB - FLL - TEB
-
-🆕 Checking for new flights...
-   Found 2 new locator(s)
-   Processing locator: ABC123
-      Route: TEB - BNA - MKE - TEB
-      Legs: 3
-📲 NOTIFICATION: 🛫 New flight: Feb 12 at 08:00 on N123AB TEB - BNA - MKE - TEB
-   ✓ Sent successfully
-   
-   Processing locator: XYZ789
-      Route: TEB - FLL - TEB
-      Legs: 2
-📲 NOTIFICATION: 🛫 New flight: Feb 13 at 14:00 on N456CD TEB - FLL - TEB
-   ✓ Sent successfully
-
-👥 Checking for crew changes...
-   Locator: ABC123
-      Previous crew: 
-      Current crew: John Smith, Mike Johnson
-📲 NOTIFICATION: 👨‍✈️ Crew: PIC: John, SIC: Mike - Feb 12 at 08:00 TEB - BNA - MKE - TEB
-   ✓ Sent successfully
-   
-   Found 1 crew change(s)
-
-✓ Done
