@@ -92,17 +92,33 @@ func fetchAircraftHomeBase(tail: String) -> String? {
     let command = "curl -s --max-time 10 -H 'Cookie: _app_session=\(sessionCookie)' '\(url)'"
     let result = runCommand(command)
     
-    if result.exitCode != 0 { return nil }
+    if result.exitCode != 0 { 
+        print("    ERROR: curl failed")
+        return nil 
+    }
     
-    // Pattern: Home base:<\/td><td><div>TEB
-    let pattern = #"Home base:<\\/td><td><div>([A-Z]{3})"#
-    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+    // Debug: print first 500 chars of response
+    if tail == "N682D" {
+        let preview = String(result.output.prefix(500))
+        print("    DEBUG response preview: \(preview)")
+    }
     
-    let nsString = result.output as NSString
-    let matches = regex.matches(in: result.output, range: NSRange(location: 0, length: nsString.length))
+    // Try multiple patterns
+    let patterns = [
+        #"Home base:<\\/td><td><div>([A-Z]{3})"#,
+        #"Home base:</td><td><div>([A-Z]{3})"#,
+        #"Home base:.*?<div>([A-Z]{3})"#
+    ]
     
-    if let match = matches.first, match.numberOfRanges == 2 {
-        return nsString.substring(with: match.range(at: 1))
+    for pattern in patterns {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+        
+        let nsString = result.output as NSString
+        let matches = regex.matches(in: result.output, range: NSRange(location: 0, length: nsString.length))
+        
+        if let match = matches.first, match.numberOfRanges == 2 {
+            return nsString.substring(with: match.range(at: 1))
+        }
     }
     
     return nil
