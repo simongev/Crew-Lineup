@@ -3,6 +3,7 @@
 import Foundation
 
 let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
+// Make sure all TEB-based aircraft UUIDs are listed here
 let aircraftUUIDs = [
     "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
     "f15b98b7-9d5b-4dcb-bfd5-7faf0bf7a911",
@@ -25,7 +26,8 @@ struct Flight: Codable, Hashable {
     let aircraft: String?
     let destination: String?
     let origin: String?
-    let locator: String?
+    let pnr: String?
+    let eventTypeName: String?
     let isActualFlight: Bool
     
     init(from dict: [String: Any]) {
@@ -36,7 +38,8 @@ struct Flight: Codable, Hashable {
             self.aircraft = props["aircraft"] as? String
             self.destination = props["destination_short"] as? String
             self.origin = props["origin_short"] as? String
-            self.locator = props["locator"] as? String
+            self.pnr = props["pnr"] as? String
+            self.eventTypeName = props["event_type_name"] as? String
             
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
@@ -56,7 +59,8 @@ struct Flight: Codable, Hashable {
             self.aircraft = nil
             self.destination = nil
             self.origin = nil
-            self.locator = nil
+            self.pnr = nil
+            self.eventTypeName = nil
             self.crew = nil
             self.isActualFlight = false
         }
@@ -148,9 +152,9 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
         return nil
     }
     
-    let flights = json.map { Flight(from: $0) }.filter { $0.isActualFlight }
-    print("Found \(flights.count) actual flights")
-    return flights
+    let allFlights = json.map { Flight(from: $0) }
+    print("Found \(allFlights.count) total events")
+    return allFlights
 }
 
 func formatDateTime(_ isoString: String?) -> String {
@@ -186,8 +190,31 @@ func buildFullRoute(for flights: [Flight]) -> String {
     return route.joined(separator: " - ")
 }
 
-func groupByLocator(_ flights: [Flight]) -> [String: [Flight]] {
-    Dictionary(grouping: flights) { $0.locator ?? $0.id }
+func groupByTrip(_ flights: [Flight]) -> [String: [Flight]] {
+    Dictionary(grouping: flights) { $0.pnr ?? $0.id }
+}
+
+func getEventIcon(_ eventType: String?) -> String {
+    guard let type = eventType?.lowercased() else { return "📅" }
+    
+    if type.contains("maintenance") {
+        return "🔧"
+    } else if type.contains("flight") || type.contains("customer") {
+        return "🛫"
+    } else {
+        return "📅"
+    }
+}
+
+func simplifyEventType(_ eventType: String?) -> String {
+    guard let type = eventType else { return "Event" }
+    
+    let lowerType = type.lowercased()
+    if lowerType.contains("flight") || lowerType.contains("customer") {
+        return "Flight"
+    }
+    
+    return type
 }
 
 func loadPreviousFlights() -> [Flight]? {
@@ -205,6 +232,7 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
+print("Monitoring \(aircraftUUIDs.count) aircraft")
 
 guard let currentFlights = fetchFlights() else {
     print("FATAL: Failed to fetch")
@@ -214,18 +242,12 @@ guard let currentFlights = fetchFlights() else {
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
 print("Upcoming: \(upcomingFlights.count)")
 
-print("\n📋 DEBUG - All upcoming flights:")
-for flight in upcomingFlights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }) {
-    let route = "\(flight.origin ?? "?")-\(flight.destination ?? "?")"
-    let locatorInfo = flight.locator != nil ? "locator=\(flight.locator!)" : "NO LOCATOR (using id=\(flight.id.prefix(8)))"
-    print("   \(route) on \(flight.aircraft ?? "?") | \(locatorInfo)")
-}
-
-print("\n📋 Current locators:")
-for (locator, legs) in groupByLocator(upcomingFlights) {
+print("\n📋 Detected trips/events:")
+for (tripKey, legs) in groupByTrip(upcomingFlights) {
     let route = buildFullRoute(for: legs)
     let aircraft = legs.first?.aircraft ?? "?"
-    print("   \(locator.prefix(20)): \(legs.count) leg(s) - \(route) on \(aircraft)")
+    let eventType = legs.first?.eventTypeName ?? "Unknown"
+    print("   \(tripKey.prefix(30)): \(legs.count) leg(s) - \(route) on \(aircraft) [\(eventType)]")
 }
 
 guard let previous = loadPreviousFlights() else {
@@ -238,45 +260,51 @@ let previousUpcoming = previous.filter { !$0.isPast() }
 let previousSet = Set(previousUpcoming)
 let currentSet = Set(upcomingFlights)
 
-print("\n🆕 Checking for new flights...")
+print("\n🆕 Checking for new events...")
 let newFlights = currentSet.subtracting(previousSet)
-let newFlightsByLocator = groupByLocator(Array(newFlights))
+let newFlightsByTrip = groupByTrip(Array(newFlights))
 
-print("   Found \(newFlightsByLocator.count) new locator(s)")
+print("   Found \(newFlightsByTrip.count) new trip(s)/event(s)")
 
-for (locator, flights) in newFlightsByLocator {
-    print("   Processing locator: \(locator.prefix(20))")
+for (tripKey, flights) in newFlightsByTrip {
+    print("   Processing: \(tripKey.prefix(30))")
     
     guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
-        print("      ✗ No first flight found")
         continue 
     }
     
     let time = formatDateTime(firstFlight.start)
     let aircraft = firstFlight.aircraft ?? "Unknown"
     let route = buildFullRoute(for: flights)
+    let eventType = simplifyEventType(firstFlight.eventTypeName)
+    let icon = getEventIcon(firstFlight.eventTypeName)
     
     print("      Route: \(route)")
     print("      Legs: \(flights.count)")
+    print("      Type: \(eventType)")
     
-    sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
+    if route.isEmpty {
+        sendNotification("\(icon) \(eventType): \(time) on \(aircraft)")
+    } else {
+        sendNotification("\(icon) \(eventType): \(time) on \(aircraft) \(route)")
+    }
 }
 
 print("\n👥 Checking for crew changes...")
-let previousByLocator = groupByLocator(previousUpcoming)
-let currentByLocator = groupByLocator(upcomingFlights)
+let previousByTrip = groupByTrip(previousUpcoming)
+let currentByTrip = groupByTrip(upcomingFlights)
 
 var crewChanges = 0
 
-for (locator, currentLegs) in currentByLocator {
-    guard let previousLegs = previousByLocator[locator] else { continue }
+for (tripKey, currentLegs) in currentByTrip {
+    guard let previousLegs = previousByTrip[tripKey] else { continue }
     
     let prevCrew = Set(previousLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
     let currCrew = Set(currentLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
     
     if prevCrew != currCrew && !currCrew.isEmpty {
         crewChanges += 1
-        print("   Locator: \(locator.prefix(20))")
+        print("   Trip: \(tripKey.prefix(30))")
         print("      Previous crew: \(prevCrew.joined(separator: ", "))")
         print("      Current crew: \(currCrew.joined(separator: ", "))")
         
