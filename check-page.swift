@@ -357,21 +357,27 @@ let newFlightsByTrip = groupByTrip(Array(newFlights))
 
 print("   Found \(newFlightsByTrip.count) new trip(s)/event(s)")
 
-for (_, flights) in newFlightsByTrip {
-    guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
+// Group ALL current flights by trip for building complete routes
+let allCurrentByTrip = groupByTrip(upcomingFlights)
+
+for (tripKey, newLegs) in newFlightsByTrip {
+    guard let firstNewFlight = newLegs.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
         continue 
     }
     
-    guard firstFlight.shouldNotify() else {
+    guard firstNewFlight.shouldNotify() else {
         print("   Skipping filtered event")
         continue
     }
     
-    let time = formatDateTime(firstFlight.start)
-    let aircraft = firstFlight.aircraft ?? "Unknown"
-    let route = buildFullRoute(for: flights)
-    let eventType = simplifyEventType(firstFlight.eventTypeName)
-    let icon = getEventIcon(firstFlight.eventTypeName)
+    // Get ALL legs for this trip (not just new ones) to build complete route
+    let allLegsForTrip = allCurrentByTrip[tripKey] ?? newLegs
+    
+    let time = formatDateTime(firstNewFlight.start)
+    let aircraft = firstNewFlight.aircraft ?? "Unknown"
+    let route = buildFullRoute(for: allLegsForTrip)
+    let eventType = simplifyEventType(firstNewFlight.eventTypeName)
+    let icon = getEventIcon(firstNewFlight.eventTypeName)
     
     if route.isEmpty {
         sendNotification("\(icon) \(eventType): \(time) on \(aircraft)")
