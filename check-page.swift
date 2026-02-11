@@ -89,36 +89,32 @@ func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
 func fetchAircraftHomeBase(tail: String) -> String? {
     let timestamp = Int(Date().timeIntervalSince1970 * 1000)
     let url = "https://portal.jetinsight.com/schedule/aircraft/\(tail)/aircraft_info?_=\(timestamp)"
-    let command = "curl -s --max-time 10 -H 'Cookie: _app_session=\(sessionCookie)' '\(url)'"
+    
+    let command = """
+    curl -s --max-time 10 \
+      -H 'Cookie: _app_session=\(sessionCookie)' \
+      -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' \
+      -H 'Accept: */*' \
+      -H 'Referer: https://portal.jetinsight.com/schedule' \
+      -H 'X-Requested-With: XMLHttpRequest' \
+      '\(url)'
+    """
+    
     let result = runCommand(command)
     
     if result.exitCode != 0 { 
-        print("    ERROR: curl failed")
         return nil 
     }
     
-    // Debug: print first 500 chars of response
-    if tail == "N682D" {
-        let preview = String(result.output.prefix(500))
-        print("    DEBUG response preview: \(preview)")
-    }
+    // Pattern: Home base:</td><td><div>TEB
+    let pattern = #"Home base:<\\/td><td><div>([A-Z]{3})"#
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
     
-    // Try multiple patterns
-    let patterns = [
-        #"Home base:<\\/td><td><div>([A-Z]{3})"#,
-        #"Home base:</td><td><div>([A-Z]{3})"#,
-        #"Home base:.*?<div>([A-Z]{3})"#
-    ]
+    let nsString = result.output as NSString
+    let matches = regex.matches(in: result.output, range: NSRange(location: 0, length: nsString.length))
     
-    for pattern in patterns {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
-        
-        let nsString = result.output as NSString
-        let matches = regex.matches(in: result.output, range: NSRange(location: 0, length: nsString.length))
-        
-        if let match = matches.first, match.numberOfRanges == 2 {
-            return nsString.substring(with: match.range(at: 1))
-        }
+    if let match = matches.first, match.numberOfRanges == 2 {
+        return nsString.substring(with: match.range(at: 1))
     }
     
     return nil
@@ -165,7 +161,7 @@ func fetchTEBAircraftUUIDs() -> [String]? {
         } else {
             print("  \(tail): Failed to fetch")
         }
-        usleep(100000)
+        usleep(200000) // 200ms delay
     }
     
     print("\nFound \(tebUUIDs.count) \(homeBase)-based aircraft")
@@ -205,7 +201,7 @@ func fetchFlights(uuids: [String], attempt: Int = 1) -> [Flight]? {
     let result = runCommand(command)
     
     if result.exitCode != 0 {
-        print("ERROR: curl failed with exit code \(result.exitCode)")
+        print("ERROR: curl failed")
         if attempt < 3 {
             sleep(5)
             return fetchFlights(uuids: uuids, attempt: attempt + 1)
