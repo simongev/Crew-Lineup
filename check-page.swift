@@ -1,3 +1,4 @@
+
 #!/usr/bin/env swift
 
 import Foundation
@@ -106,7 +107,6 @@ func fetchAircraftHomeBase(tail: String) -> String? {
         return nil 
     }
     
-    // Pattern: Home base:</td><td><div>TEB
     let pattern = #"Home base:<\\/td><td><div>([A-Z]{3})"#
     guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
     
@@ -161,7 +161,7 @@ func fetchTEBAircraftUUIDs() -> [String]? {
         } else {
             print("  \(tail): Failed to fetch")
         }
-        usleep(200000) // 200ms delay
+        usleep(200000)
     }
     
     print("\nFound \(tebUUIDs.count) \(homeBase)-based aircraft")
