@@ -3,9 +3,24 @@
 import Foundation
 
 let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
+let aircraftUUIDs = [
+    "857bca59-d347-4d2f-9aa1-d780a42858f0",
+    "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
+    "f15b98b7-9d5b-4dcb-bfd5-7faf0bf7a911",
+    "b36448e1-109a-4c94-a613-13d12471f0a1",
+    "96e1dd0a-4475-420c-9251-e8bccceafdad",
+    "63c15a2a-7612-4c87-a1fb-4ca3f50d2e99",
+    "445712bc-4a8d-42c9-8b69-26036ab16cf4",
+    "2a7d5031-50a0-4a20-b081-d5a304dc85da",
+    "81971512-bd2c-4939-8d67-57e014160f81",
+    "a70c0514-0a7b-4e37-b0c7-4f557942880d"
+]
+let companyTailNumbers = [
+    "N84UP", "N717KV", "N682D", "N800TL", "N125XP",
+    "N818LX", "N240V", "N361CA", "N850DP", "N488RJ"
+]
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
-let homeBase = "TEB"  // Filter for TEB-based aircraft
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
@@ -23,7 +38,6 @@ struct Flight: Codable, Hashable {
     let origin: String?
     let pnr: String?
     let eventTypeName: String?
-    let homeBase: String?
     
     init(from dict: [String: Any]) {
         self.start = dict["start"] as? String
@@ -35,7 +49,6 @@ struct Flight: Codable, Hashable {
             self.origin = props["origin_short"] as? String
             self.pnr = props["pnr"] as? String
             self.eventTypeName = props["event_type_name"] as? String
-            self.homeBase = props["base"] as? String
             
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
@@ -54,7 +67,6 @@ struct Flight: Codable, Hashable {
             self.origin = nil
             self.pnr = nil
             self.eventTypeName = nil
-            self.homeBase = nil
             self.crew = nil
         }
     }
@@ -77,8 +89,9 @@ func buildURL() -> String {
     let startDate = formatter.string(from: now).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
     let endDate = formatter.string(from: weekFromNow).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
     
-    // Try without UUID filter - fetch all aircraft
-    return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&parallel_load=true"
+    let uuidParams = aircraftUUIDs.map { "uuid%5B%5D=\($0)" }.joined(separator: "&")
+    
+    return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
 }
 
 func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
@@ -114,13 +127,13 @@ func sendNotification(_ message: String) {
 
 func fetchFlights(attempt: Int = 1) -> [Flight]? {
     let urlString = buildURL()
-    print("Fetching all flights...")
+    print("Fetching flights (attempt \(attempt))...")
     
-    let command = "curl -s -H 'Cookie: _app_session=\(sessionCookie)' '\(urlString)'"
+    let command = "curl -s --max-time 30 -H 'Cookie: _app_session=\(sessionCookie)' '\(urlString)'"
     let result = runCommand(command)
     
     if result.exitCode != 0 {
-        print("ERROR: curl failed")
+        print("ERROR: curl failed with exit code \(result.exitCode)")
         if attempt < 3 {
             sleep(5)
             return fetchFlights(attempt: attempt + 1)
@@ -145,8 +158,7 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
     }
     
     let allFlights = json.map { Flight(from: $0) }
-    print("Found \(allFlights.count) total events from all aircraft")
-    
+    print("Found \(allFlights.count) total events from API")
     return allFlights
 }
 
@@ -225,45 +237,37 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
-print("Filtering for aircraft based at: \(homeBase)")
+print("Company aircraft: \(companyTailNumbers.joined(separator: ", "))")
 
 guard let allFlights = fetchFlights() else {
     print("FATAL: Failed to fetch")
     exit(1)
 }
 
-// Filter for TEB-based aircraft only
-let currentFlights = allFlights.filter { flight in
-    // Try to determine if this aircraft is TEB-based
-    // Option 1: Check if there's a "base" field
-    if let base = flight.homeBase {
-        return base == homeBase
-    }
-    
-    // Option 2: Check if origin is TEB (most flights from TEB aircraft start there)
-    if let origin = flight.origin {
-        return origin == homeBase
-    }
-    
-    // If we can't determine, include it for now
-    return false
+let companyFlights = allFlights.filter { flight in
+    guard let tail = flight.aircraft else { return false }
+    return companyTailNumbers.contains(tail)
 }
 
-print("Filtered to \(currentFlights.count) events for \(homeBase)-based aircraft")
+print("Filtered to \(companyFlights.count) events for company aircraft")
 
-// Show which aircraft we found
-let uniqueAircraft = Set(currentFlights.compactMap { $0.aircraft })
-print("Aircraft found: \(uniqueAircraft.sorted().joined(separator: ", "))")
+let foundTailNumbers = Set(companyFlights.compactMap { $0.aircraft })
+let missingTailNumbers = Set(companyTailNumbers).subtracting(foundTailNumbers)
 
-let upcomingFlights = currentFlights.filter { !$0.isPast() }
-print("Upcoming: \(upcomingFlights.count)")
+print("\n✓ Found aircraft: \(foundTailNumbers.sorted().joined(separator: ", "))")
+if !missingTailNumbers.isEmpty {
+    print("⚠️  Missing aircraft: \(missingTailNumbers.sorted().joined(separator: ", "))")
+}
+
+let upcomingFlights = companyFlights.filter { !$0.isPast() }
+print("\nUpcoming: \(upcomingFlights.count)")
 
 print("\n📋 Detected trips/events:")
 for (tripKey, legs) in groupByTrip(upcomingFlights) {
     let route = buildFullRoute(for: legs)
     let aircraft = legs.first?.aircraft ?? "?"
     let eventType = legs.first?.eventTypeName ?? "Unknown"
-    print("   \(tripKey.prefix(30)): \(legs.count) leg(s) - \(route) on \(aircraft) [\(eventType)]")
+    print("   \(aircraft): \(route.isEmpty ? eventType : route) [\(eventType)]")
 }
 
 guard let previous = loadPreviousFlights() else {
@@ -283,8 +287,6 @@ let newFlightsByTrip = groupByTrip(Array(newFlights))
 print("   Found \(newFlightsByTrip.count) new trip(s)/event(s)")
 
 for (tripKey, flights) in newFlightsByTrip {
-    print("   Processing: \(tripKey.prefix(30))")
-    
     guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
         continue 
     }
@@ -294,10 +296,6 @@ for (tripKey, flights) in newFlightsByTrip {
     let route = buildFullRoute(for: flights)
     let eventType = simplifyEventType(firstFlight.eventTypeName)
     let icon = getEventIcon(firstFlight.eventTypeName)
-    
-    print("      Route: \(route)")
-    print("      Legs: \(flights.count)")
-    print("      Type: \(eventType)")
     
     if route.isEmpty {
         sendNotification("\(icon) \(eventType): \(time) on \(aircraft)")
@@ -320,9 +318,6 @@ for (tripKey, currentLegs) in currentByTrip {
     
     if prevCrew != currCrew && !currCrew.isEmpty {
         crewChanges += 1
-        print("   Trip: \(tripKey.prefix(30))")
-        print("      Previous crew: \(prevCrew.joined(separator: ", "))")
-        print("      Current crew: \(currCrew.joined(separator: ", "))")
         
         guard let firstFlight = currentLegs.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { continue }
         
