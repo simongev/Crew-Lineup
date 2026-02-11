@@ -3,14 +3,9 @@
 import Foundation
 
 let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
-// Make sure all TEB-based aircraft UUIDs are listed here
-let aircraftUUIDs = [
-    "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
-    "f15b98b7-9d5b-4dcb-bfd5-7faf0bf7a911",
-    "445712bc-4a8d-42c9-8b69-26036ab16cf4"
-]
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
+let homeBase = "TEB"  // Filter for TEB-based aircraft
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
@@ -28,7 +23,7 @@ struct Flight: Codable, Hashable {
     let origin: String?
     let pnr: String?
     let eventTypeName: String?
-    let isActualFlight: Bool
+    let homeBase: String?
     
     init(from dict: [String: Any]) {
         self.start = dict["start"] as? String
@@ -40,6 +35,7 @@ struct Flight: Codable, Hashable {
             self.origin = props["origin_short"] as? String
             self.pnr = props["pnr"] as? String
             self.eventTypeName = props["event_type_name"] as? String
+            self.homeBase = props["base"] as? String
             
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
@@ -51,9 +47,6 @@ struct Flight: Codable, Hashable {
             } else {
                 self.crew = nil
             }
-            
-            let eventGroup = props["event_group"] as? String ?? ""
-            self.isActualFlight = eventGroup == "customer_flight"
         } else {
             self.id = UUID().uuidString
             self.aircraft = nil
@@ -61,8 +54,8 @@ struct Flight: Codable, Hashable {
             self.origin = nil
             self.pnr = nil
             self.eventTypeName = nil
+            self.homeBase = nil
             self.crew = nil
-            self.isActualFlight = false
         }
     }
     
@@ -84,9 +77,8 @@ func buildURL() -> String {
     let startDate = formatter.string(from: now).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
     let endDate = formatter.string(from: weekFromNow).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
     
-    let uuidParams = aircraftUUIDs.map { "uuid%5B%5D=\($0)" }.joined(separator: "&")
-    
-    return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
+    // Try without UUID filter - fetch all aircraft
+    return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&parallel_load=true"
 }
 
 func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
@@ -122,7 +114,7 @@ func sendNotification(_ message: String) {
 
 func fetchFlights(attempt: Int = 1) -> [Flight]? {
     let urlString = buildURL()
-    print("Fetching flights (attempt \(attempt))...")
+    print("Fetching all flights...")
     
     let command = "curl -s -H 'Cookie: _app_session=\(sessionCookie)' '\(urlString)'"
     let result = runCommand(command)
@@ -153,7 +145,8 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
     }
     
     let allFlights = json.map { Flight(from: $0) }
-    print("Found \(allFlights.count) total events")
+    print("Found \(allFlights.count) total events from all aircraft")
+    
     return allFlights
 }
 
@@ -232,12 +225,35 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
-print("Monitoring \(aircraftUUIDs.count) aircraft")
+print("Filtering for aircraft based at: \(homeBase)")
 
-guard let currentFlights = fetchFlights() else {
+guard let allFlights = fetchFlights() else {
     print("FATAL: Failed to fetch")
     exit(1)
 }
+
+// Filter for TEB-based aircraft only
+let currentFlights = allFlights.filter { flight in
+    // Try to determine if this aircraft is TEB-based
+    // Option 1: Check if there's a "base" field
+    if let base = flight.homeBase {
+        return base == homeBase
+    }
+    
+    // Option 2: Check if origin is TEB (most flights from TEB aircraft start there)
+    if let origin = flight.origin {
+        return origin == homeBase
+    }
+    
+    // If we can't determine, include it for now
+    return false
+}
+
+print("Filtered to \(currentFlights.count) events for \(homeBase)-based aircraft")
+
+// Show which aircraft we found
+let uniqueAircraft = Set(currentFlights.compactMap { $0.aircraft })
+print("Aircraft found: \(uniqueAircraft.sorted().joined(separator: ", "))")
 
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
 print("Upcoming: \(upcomingFlights.count)")
