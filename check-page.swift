@@ -99,19 +99,35 @@ func fetchAircraftBases() -> [String: String]? {
     }
     
     let html = result.output
+    
+    // Debug: check if we got HTML
+    print("HTML length: \(html.count)")
+    if html.contains("data-resource-id") {
+        print("✓ Found data-resource-id in HTML")
+    } else {
+        print("✗ No data-resource-id found")
+    }
+    
+    if html.contains("calendar-resource-homebase") {
+        print("✓ Found calendar-resource-homebase in HTML")
+    } else {
+        print("✗ No calendar-resource-homebase found")
+    }
+    
     var aircraftBases: [String: String] = [:]
     
-    // Parse HTML to extract UUID and base
-    // Pattern: data-resource-id="UUID"...calendar-resource-homebase">BASE</div>
-    let pattern = #"data-resource-id="([^"]+)"[\s\S]*?calendar-resource-homebase">\s*([A-Z]{3})\s*</div>"#
+    // Updated pattern with dotMatchesLineSeparators option
+    let pattern = #"data-resource-id="([0-9a-f-]+)".*?calendar-resource-homebase">[\s\n]*([A-Z]{3})"#
     
-    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
         print("ERROR: Failed to create regex")
         return nil
     }
     
     let nsString = html as NSString
     let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsString.length))
+    
+    print("Found \(matches.count) regex matches")
     
     for match in matches {
         if match.numberOfRanges == 3 {
@@ -121,6 +137,7 @@ func fetchAircraftBases() -> [String: String]? {
             let uuid = nsString.substring(with: uuidRange)
             let base = nsString.substring(with: baseRange)
             
+            print("  → \(uuid): \(base)")
             aircraftBases[uuid] = base
         }
     }
@@ -275,7 +292,7 @@ guard let aircraftBases = fetchAircraftBases() else {
 
 // Filter for TEB-based aircraft
 let tebUUIDs = aircraftBases.filter { $0.value == homeBase }.map { $0.key }
-print("Found \(tebUUIDs.count) \(homeBase)-based aircraft: \(tebUUIDs.joined(separator: ", "))")
+print("Found \(tebUUIDs.count) \(homeBase)-based aircraft")
 
 if tebUUIDs.isEmpty {
     print("ERROR: No \(homeBase)-based aircraft found")
