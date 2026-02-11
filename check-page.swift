@@ -94,7 +94,8 @@ func fetchAircraftHomeBase(tail: String) -> String? {
     
     if result.exitCode != 0 { return nil }
     
-    let pattern = #"Home base:<\\\/td><td><div>([A-Z]{3})"#
+    // Pattern: Home base:<\/td><td><div>TEB
+    let pattern = #"Home base:<\\/td><td><div>([A-Z]{3})"#
     guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
     
     let nsString = result.output as NSString
@@ -148,7 +149,7 @@ func fetchTEBAircraftUUIDs() -> [String]? {
         } else {
             print("  \(tail): Failed to fetch")
         }
-        usleep(100000) // 100ms delay to avoid rate limiting
+        usleep(100000)
     }
     
     print("\nFound \(tebUUIDs.count) \(homeBase)-based aircraft")
