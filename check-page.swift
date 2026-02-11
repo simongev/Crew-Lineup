@@ -103,16 +103,16 @@ func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
 }
 
 func sendNotification(_ message: String) {
-    print("📲 Notification: \(message)")
+    print("📲 NOTIFICATION: \(message)")
     
     let escapedMessage = message.replacingOccurrences(of: "'", with: "'\\''")
     let command = "curl -s -d '\(escapedMessage)' https://ntfy.sh/\(ntfyTopic)"
     
     let result = runCommand(command)
     if result.exitCode == 0 {
-        print("📲 Sent")
+        print("   ✓ Sent successfully")
     } else {
-        print("📲 Error: \(result.output)")
+        print("   ✗ Error: \(result.output)")
     }
 }
 
@@ -214,8 +214,15 @@ guard let currentFlights = fetchFlights() else {
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
 print("Upcoming: \(upcomingFlights.count)")
 
+// Debug: Show all locators
+print("\n📋 Current locators:")
+for (locator, legs) in groupByLocator(upcomingFlights) {
+    let route = buildFullRoute(for: legs)
+    print("   \(locator): \(legs.count) leg(s) - \(route)")
+}
+
 guard let previous = loadPreviousFlights() else {
-    print("First run - saving baseline")
+    print("\n✓ First run - saving baseline")
     saveFlights(upcomingFlights)
     exit(0)
 }
@@ -224,21 +231,37 @@ let previousUpcoming = previous.filter { !$0.isPast() }
 let previousSet = Set(previousUpcoming)
 let currentSet = Set(upcomingFlights)
 
-// New flights
+// New flights - ONE notification per locator
+print("\n🆕 Checking for new flights...")
 let newFlights = currentSet.subtracting(previousSet)
-for (_, flights) in groupByLocator(Array(newFlights)) {
-    guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { continue }
+let newFlightsByLocator = groupByLocator(Array(newFlights))
+
+print("   Found \(newFlightsByLocator.count) new locator(s)")
+
+for (locator, flights) in newFlightsByLocator {
+    print("   Processing locator: \(locator)")
+    
+    guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
+        print("      ✗ No first flight found")
+        continue 
+    }
     
     let time = formatDateTime(firstFlight.start)
     let aircraft = firstFlight.aircraft ?? "Unknown"
     let route = buildFullRoute(for: flights)
     
+    print("      Route: \(route)")
+    print("      Legs: \(flights.count)")
+    
     sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
 }
 
-// Crew changes
+// Crew changes - ONE notification per locator
+print("\n👥 Checking for crew changes...")
 let previousByLocator = groupByLocator(previousUpcoming)
 let currentByLocator = groupByLocator(upcomingFlights)
+
+var crewChanges = 0
 
 for (locator, currentLegs) in currentByLocator {
     guard let previousLegs = previousByLocator[locator] else { continue }
@@ -247,6 +270,11 @@ for (locator, currentLegs) in currentByLocator {
     let currCrew = Set(currentLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
     
     if prevCrew != currCrew && !currCrew.isEmpty {
+        crewChanges += 1
+        print("   Locator: \(locator)")
+        print("      Previous crew: \(prevCrew.joined(separator: ", "))")
+        print("      Current crew: \(currCrew.joined(separator: ", "))")
+        
         guard let firstFlight = currentLegs.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { continue }
         
         let time = formatDateTime(firstFlight.start)
@@ -269,5 +297,44 @@ for (locator, currentLegs) in currentByLocator {
     }
 }
 
+print("   Found \(crewChanges) crew change(s)")
+
 saveFlights(upcomingFlights)
-print("✓ Done")
+print("\n✓ Done")
+```
+
+**What this debug output shows:**
+```
+=== Flight check ===
+Found 6 actual flights
+
+Upcoming: 6
+
+📋 Current locators:
+   ABC123: 3 leg(s) - TEB - BNA - MKE - TEB
+   XYZ789: 2 leg(s) - TEB - FLL - TEB
+
+🆕 Checking for new flights...
+   Found 2 new locator(s)
+   Processing locator: ABC123
+      Route: TEB - BNA - MKE - TEB
+      Legs: 3
+📲 NOTIFICATION: 🛫 New flight: Feb 12 at 08:00 on N123AB TEB - BNA - MKE - TEB
+   ✓ Sent successfully
+   
+   Processing locator: XYZ789
+      Route: TEB - FLL - TEB
+      Legs: 2
+📲 NOTIFICATION: 🛫 New flight: Feb 13 at 14:00 on N456CD TEB - FLL - TEB
+   ✓ Sent successfully
+
+👥 Checking for crew changes...
+   Locator: ABC123
+      Previous crew: 
+      Current crew: John Smith, Mike Johnson
+📲 NOTIFICATION: 👨‍✈️ Crew: PIC: John, SIC: Mike - Feb 12 at 08:00 TEB - BNA - MKE - TEB
+   ✓ Sent successfully
+   
+   Found 1 crew change(s)
+
+✓ Done
