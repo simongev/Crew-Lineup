@@ -10,7 +10,6 @@ let aircraftUUIDs = [
 ]
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
-let myLastName = "Simon"
 
 let sessionCookie = ProcessInfo.processInfo.environment["SESSION_COOKIE"] ?? ""
 
@@ -104,16 +103,16 @@ func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
 }
 
 func sendNotification(_ message: String) {
-    print("📲 Sending notification: \(message)")
+    print("📲 Notification: \(message)")
     
     let escapedMessage = message.replacingOccurrences(of: "'", with: "'\\''")
     let command = "curl -s -d '\(escapedMessage)' https://ntfy.sh/\(ntfyTopic)"
     
     let result = runCommand(command)
     if result.exitCode == 0 {
-        print("📲 Notification sent successfully")
+        print("📲 Sent")
     } else {
-        print("📲 Notification error: \(result.output)")
+        print("📲 Error: \(result.output)")
     }
 }
 
@@ -125,64 +124,50 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
     let result = runCommand(command)
     
     if result.exitCode != 0 {
-        print("ERROR: curl failed with exit code \(result.exitCode)")
+        print("ERROR: curl failed")
         if attempt < 3 {
-            print("Retrying in 5 seconds...")
             sleep(5)
             return fetchFlights(attempt: attempt + 1)
         }
         return nil
     }
-    
-    let data = result.output.data(using: .utf8) ?? Data()
     
     if result.output.contains("<!DOCTYPE html>") {
-        print("ERROR: Got HTML instead of JSON - session expired")
-        sendNotification("⚠️ Session expired! Update SESSION_COOKIE in GitHub secrets")
+        print("ERROR: Session expired")
+        sendNotification("⚠️ Session expired! Update SESSION_COOKIE")
         return nil
     }
     
-    do {
-        if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            let allFlights = json.map { Flight(from: $0) }
-            let flights = allFlights.filter { $0.isActualFlight }
-            print("Found \(flights.count) actual flights")
-            return flights
-        }
-    } catch {
-        print("JSON parse error: \(error)")
+    guard let data = result.output.data(using: .utf8),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        print("ERROR: JSON parse failed")
         if attempt < 3 {
-            print("Retrying in 5 seconds...")
             sleep(5)
             return fetchFlights(attempt: attempt + 1)
         }
+        return nil
     }
     
-    return nil
+    let flights = json.map { Flight(from: $0) }.filter { $0.isActualFlight }
+    print("Found \(flights.count) actual flights")
+    return flights
 }
 
 func formatDateTime(_ isoString: String?) -> String {
-    guard let isoString = isoString else { return "Unknown time" }
-    
-    let formatter = ISO8601DateFormatter()
-    guard let date = formatter.date(from: isoString) else { return isoString }
-    
-    let calendar = Calendar.current
-    
-    let displayFormatter = DateFormatter()
-    displayFormatter.timeZone = TimeZone(identifier: "America/New_York")
-    
-    if calendar.isDateInToday(date) {
-        displayFormatter.dateFormat = "'today at' HH:mm"
-    } else {
-        displayFormatter.dateFormat = "MMM d 'at' HH:mm"
+    guard let isoString = isoString,
+          let date = ISO8601DateFormatter().date(from: isoString) else {
+        return "Unknown time"
     }
     
-    return displayFormatter.string(from: date)
+    let formatter = DateFormatter()
+    formatter.timeZone = TimeZone(identifier: "America/New_York")
+    formatter.dateFormat = Calendar.current.isDateInToday(date) ? "'today at' HH:mm" : "MMM d 'at' HH:mm"
+    
+    return formatter.string(from: date)
 }
 
 func getFirstName(_ fullName: String) -> String {
-    return fullName.components(separatedBy: " ").first ?? fullName
+    fullName.components(separatedBy: " ").first ?? fullName
 }
 
 func buildFullRoute(for flights: [Flight]) -> String {
@@ -190,10 +175,8 @@ func buildFullRoute(for flights: [Flight]) -> String {
     var route: [String] = []
     
     for flight in sorted {
-        if let origin = flight.origin {
-            if route.isEmpty || route.last != origin {
-                route.append(origin)
-            }
+        if let origin = flight.origin, route.last != origin {
+            route.append(origin)
         }
         if let dest = flight.destination {
             route.append(dest)
@@ -204,12 +187,7 @@ func buildFullRoute(for flights: [Flight]) -> String {
 }
 
 func groupByLocator(_ flights: [Flight]) -> [String: [Flight]] {
-    var grouped: [String: [Flight]] = [:]
-    for flight in flights {
-        let key = flight.locator ?? flight.id
-        grouped[key, default: []].append(flight)
-    }
-    return grouped
+    Dictionary(grouping: flights) { $0.locator ?? $0.id }
 }
 
 func loadPreviousFlights() -> [Flight]? {
@@ -229,78 +207,67 @@ func saveFlights(_ flights: [Flight]) {
 print("=== Flight check ===")
 
 guard let currentFlights = fetchFlights() else {
-    print("FATAL: Failed to fetch flights")
+    print("FATAL: Failed to fetch")
     exit(1)
 }
 
-// Filter out past flights
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
-print("Found \(upcomingFlights.count) upcoming flights (filtered out past)")
+print("Upcoming: \(upcomingFlights.count)")
 
-let previousFlights = loadPreviousFlights()
+guard let previous = loadPreviousFlights() else {
+    print("First run - saving baseline")
+    saveFlights(upcomingFlights)
+    exit(0)
+}
 
-if let previous = previousFlights {
-    // Also filter past flights from previous data
-    let previousUpcoming = previous.filter { !$0.isPast() }
+let previousUpcoming = previous.filter { !$0.isPast() }
+let previousSet = Set(previousUpcoming)
+let currentSet = Set(upcomingFlights)
+
+// New flights
+let newFlights = currentSet.subtracting(previousSet)
+for (_, flights) in groupByLocator(Array(newFlights)) {
+    guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { continue }
     
-    let previousSet = Set(previousUpcoming)
-    let currentSet = Set(upcomingFlights)
+    let time = formatDateTime(firstFlight.start)
+    let aircraft = firstFlight.aircraft ?? "Unknown"
+    let route = buildFullRoute(for: flights)
     
-    // New flights - group by locator
-    let newFlights = currentSet.subtracting(previousSet)
-    let newFlightsByLocator = groupByLocator(Array(newFlights))
+    sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
+}
+
+// Crew changes
+let previousByLocator = groupByLocator(previousUpcoming)
+let currentByLocator = groupByLocator(upcomingFlights)
+
+for (locator, currentLegs) in currentByLocator {
+    guard let previousLegs = previousByLocator[locator] else { continue }
     
-    for (_, flights) in newFlightsByLocator {
-        let sorted = flights.sorted { ($0.start ?? "") < ($1.start ?? "") }
-        guard let firstFlight = sorted.first else { continue }
+    let prevCrew = Set(previousLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+    let currCrew = Set(currentLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+    
+    if prevCrew != currCrew && !currCrew.isEmpty {
+        guard let firstFlight = currentLegs.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { continue }
         
         let time = formatDateTime(firstFlight.start)
-        let aircraft = firstFlight.aircraft ?? "Unknown"
-        let route = buildFullRoute(for: flights)
+        let route = buildFullRoute(for: currentLegs)
         
-        sendNotification("🛫 New flight: \(time) on \(aircraft) \(route)")
-    }
-    
-    // Crew changes - group by locator
-    let previousByLocator = groupByLocator(previousUpcoming)
-    let currentByLocator = groupByLocator(upcomingFlights)
-    
-    for (locator, currentLegs) in currentByLocator {
-        guard let previousLegs = previousByLocator[locator] else { continue }
+        let pic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("pic") })
+        let sic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("sic") })
         
-        let prevCrewSet = Set(previousLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
-        let currCrewSet = Set(currentLegs.flatMap { $0.crew?.map { $0.name } ?? [] })
+        var crewText = [pic, sic].compactMap { member in
+            guard let member = member else { return nil }
+            let role = member.role.uppercased().contains("PIC") ? "PIC" : "SIC"
+            return "\(role): \(getFirstName(member.name))"
+        }.joined(separator: ", ")
         
-        if prevCrewSet != currCrewSet && !currCrewSet.isEmpty {
-            let sorted = currentLegs.sorted { ($0.start ?? "") < ($1.start ?? "") }
-            guard let firstFlight = sorted.first else { continue }
-            
-            let time = formatDateTime(firstFlight.start)
-            let route = buildFullRoute(for: currentLegs)
-            
-            let pic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("pic") })
-            let sic = firstFlight.crew?.first(where: { $0.role.lowercased().contains("sic") })
-            
-            var crewText = ""
-            if let picName = pic?.name {
-                crewText += "PIC: \(getFirstName(picName))"
-            }
-            if let sicName = sic?.name {
-                if !crewText.isEmpty { crewText += ", " }
-                crewText += "SIC: \(getFirstName(sicName))"
-            }
-            
-            if crewText.isEmpty {
-                crewText = firstFlight.crew?.map { getFirstName($0.name) }.joined(separator: ", ") ?? ""
-            }
-            
-            sendNotification("👨‍✈️ Crew assigned: \(crewText) - \(time) \(route)")
+        if crewText.isEmpty {
+            crewText = firstFlight.crew?.map { getFirstName($0.name) }.joined(separator: ", ") ?? ""
         }
+        
+        sendNotification("👨‍✈️ Crew: \(crewText) - \(time) \(route)")
     }
-    
-    print("✓ Check complete")
-} else {
-    print("✓ First run, saving baseline")
 }
 
 saveFlights(upcomingFlights)
+print("✓ Done")
