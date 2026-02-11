@@ -214,10 +214,18 @@ guard let currentFlights = fetchFlights() else {
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
 print("Upcoming: \(upcomingFlights.count)")
 
+print("\n📋 DEBUG - All upcoming flights:")
+for flight in upcomingFlights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }) {
+    let route = "\(flight.origin ?? "?")-\(flight.destination ?? "?")"
+    let locatorInfo = flight.locator != nil ? "locator=\(flight.locator!)" : "NO LOCATOR (using id=\(flight.id.prefix(8)))"
+    print("   \(route) on \(flight.aircraft ?? "?") | \(locatorInfo)")
+}
+
 print("\n📋 Current locators:")
 for (locator, legs) in groupByLocator(upcomingFlights) {
     let route = buildFullRoute(for: legs)
-    print("   \(locator): \(legs.count) leg(s) - \(route)")
+    let aircraft = legs.first?.aircraft ?? "?"
+    print("   \(locator.prefix(20)): \(legs.count) leg(s) - \(route) on \(aircraft)")
 }
 
 guard let previous = loadPreviousFlights() else {
@@ -237,7 +245,7 @@ let newFlightsByLocator = groupByLocator(Array(newFlights))
 print("   Found \(newFlightsByLocator.count) new locator(s)")
 
 for (locator, flights) in newFlightsByLocator {
-    print("   Processing locator: \(locator)")
+    print("   Processing locator: \(locator.prefix(20))")
     
     guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
         print("      ✗ No first flight found")
@@ -268,7 +276,7 @@ for (locator, currentLegs) in currentByLocator {
     
     if prevCrew != currCrew && !currCrew.isEmpty {
         crewChanges += 1
-        print("   Locator: \(locator)")
+        print("   Locator: \(locator.prefix(20))")
         print("      Previous crew: \(prevCrew.joined(separator: ", "))")
         print("      Current crew: \(currCrew.joined(separator: ", "))")
         
