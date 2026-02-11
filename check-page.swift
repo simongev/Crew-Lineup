@@ -21,6 +21,7 @@ struct Flight: Codable, Hashable {
     let origin: String?
     let pnr: String?
     let eventTypeName: String?
+    let eventGroup: String?
     
     init(from dict: [String: Any]) {
         self.start = dict["start"] as? String
@@ -32,6 +33,7 @@ struct Flight: Codable, Hashable {
             self.origin = props["origin_short"] as? String
             self.pnr = props["pnr"] as? String
             self.eventTypeName = props["event_type_name"] as? String
+            self.eventGroup = props["event_group"] as? String
             
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
@@ -50,6 +52,7 @@ struct Flight: Codable, Hashable {
             self.origin = nil
             self.pnr = nil
             self.eventTypeName = nil
+            self.eventGroup = nil
             self.crew = nil
         }
     }
@@ -62,8 +65,13 @@ struct Flight: Codable, Hashable {
     }
     
     func shouldNotify() -> Bool {
-        guard let eventType = eventTypeName?.lowercased() else { return true }
-        return !eventType.contains("repositioning")
+        if let eventType = eventTypeName?.lowercased(), eventType.contains("repositioning") {
+            return false
+        }
+        if let group = eventGroup?.lowercased(), group == "is_away" {
+            return false
+        }
+        return true
     }
 }
 
@@ -355,7 +363,7 @@ for (_, flights) in newFlightsByTrip {
     }
     
     guard firstFlight.shouldNotify() else {
-        print("   Skipping repositioning event")
+        print("   Skipping filtered event")
         continue
     }
     
