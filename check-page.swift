@@ -1,6 +1,3 @@
-
-#!/usr/bin/env swift
-
 import Foundation
 
 let apiBaseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
