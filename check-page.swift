@@ -2,21 +2,9 @@
 
 import Foundation
 
-let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
-// All company aircraft
-let aircraftUUIDs = [
-    "857bca59-d347-4d2f-9aa1-d780a42858f0",
-    "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
-    "f15b98b7-9d5b-4dcb-bfd5-7faf0bf7a911",
-    "b36448e1-109a-4c94-a613-13d12471f0a1",
-    "96e1dd0a-4475-420c-9251-e8bccceafdad",
-    "63c15a2a-7612-4c87-a1fb-4ca3f50d2e99",
-    "445712bc-4a8d-42c9-8b69-26036ab16cf4",
-    "2a7d5031-50a0-4a20-b081-d5a304dc85da",
-    "81971512-bd2c-4939-8d67-57e014160f81",
-    "a70c0514-0a7b-4e37-b0c7-4f557942880d"
-]
-let homeBase = "TEB"  // Only notify for TEB-based aircraft
+let schedulePageURL = "https://portal.jetinsight.com/schedule"
+let apiBaseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
+let homeBase = "TEB"
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
 
@@ -36,7 +24,6 @@ struct Flight: Codable, Hashable {
     let origin: String?
     let pnr: String?
     let eventTypeName: String?
-    let base: String?  // Aircraft home base
     
     init(from dict: [String: Any]) {
         self.start = dict["start"] as? String
@@ -48,7 +35,6 @@ struct Flight: Codable, Hashable {
             self.origin = props["origin_short"] as? String
             self.pnr = props["pnr"] as? String
             self.eventTypeName = props["event_type_name"] as? String
-            self.base = props["base"] as? String
             
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
@@ -67,7 +53,6 @@ struct Flight: Codable, Hashable {
             self.origin = nil
             self.pnr = nil
             self.eventTypeName = nil
-            self.base = nil
             self.crew = nil
         }
     }
@@ -81,24 +66,8 @@ struct Flight: Codable, Hashable {
     
     func shouldNotify() -> Bool {
         guard let eventType = eventTypeName?.lowercased() else { return true }
-        // Skip repositioning notifications
         return !eventType.contains("repositioning")
     }
-}
-
-func buildURL() -> String {
-    let now = Date()
-    let weekFromNow = Calendar.current.date(byAdding: .day, value: 7, to: now)!
-    
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
-    
-    let startDate = formatter.string(from: now).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
-    let endDate = formatter.string(from: weekFromNow).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
-    
-    let uuidParams = aircraftUUIDs.map { "uuid%5B%5D=\($0)" }.joined(separator: "&")
-    
-    return "\(baseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
 }
 
 func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
@@ -118,6 +87,48 @@ func runCommand(_ command: String) -> (output: String, exitCode: Int32) {
     return (output, task.terminationStatus)
 }
 
+func fetchAircraftBases() -> [String: String]? {
+    print("Fetching aircraft home bases from schedule page...")
+    
+    let command = "curl -s --max-time 30 -H 'Cookie: _app_session=\(sessionCookie)' '\(schedulePageURL)'"
+    let result = runCommand(command)
+    
+    if result.exitCode != 0 {
+        print("ERROR: Failed to fetch schedule page")
+        return nil
+    }
+    
+    let html = result.output
+    var aircraftBases: [String: String] = [:]
+    
+    // Parse HTML to extract UUID and base
+    // Pattern: data-resource-id="UUID"...calendar-resource-homebase">BASE</div>
+    let pattern = #"data-resource-id="([^"]+)"[\s\S]*?calendar-resource-homebase">\s*([A-Z]{3})\s*</div>"#
+    
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+        print("ERROR: Failed to create regex")
+        return nil
+    }
+    
+    let nsString = html as NSString
+    let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsString.length))
+    
+    for match in matches {
+        if match.numberOfRanges == 3 {
+            let uuidRange = match.range(at: 1)
+            let baseRange = match.range(at: 2)
+            
+            let uuid = nsString.substring(with: uuidRange)
+            let base = nsString.substring(with: baseRange)
+            
+            aircraftBases[uuid] = base
+        }
+    }
+    
+    print("Found \(aircraftBases.count) aircraft with bases")
+    return aircraftBases
+}
+
 func sendNotification(_ message: String) {
     print("📲 NOTIFICATION: \(message)")
     
@@ -132,8 +143,19 @@ func sendNotification(_ message: String) {
     }
 }
 
-func fetchFlights(attempt: Int = 1) -> [Flight]? {
-    let urlString = buildURL()
+func fetchFlights(uuids: [String], attempt: Int = 1) -> [Flight]? {
+    let now = Date()
+    let weekFromNow = Calendar.current.date(byAdding: .day, value: 7, to: now)!
+    
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    
+    let startDate = formatter.string(from: now).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+    let endDate = formatter.string(from: weekFromNow).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+    
+    let uuidParams = uuids.map { "uuid%5B%5D=\($0)" }.joined(separator: "&")
+    let urlString = "\(apiBaseURL)?start=\(startDate)&end=\(endDate)&time_zone=America%2FNew_York&view=rollingMonth&\(uuidParams)&parallel_load=true"
+    
     print("Fetching flights (attempt \(attempt))...")
     
     let command = "curl -s --max-time 30 -H 'Cookie: _app_session=\(sessionCookie)' '\(urlString)'"
@@ -143,7 +165,7 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
         print("ERROR: curl failed with exit code \(result.exitCode)")
         if attempt < 3 {
             sleep(5)
-            return fetchFlights(attempt: attempt + 1)
+            return fetchFlights(uuids: uuids, attempt: attempt + 1)
         }
         return nil
     }
@@ -159,7 +181,7 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
         print("ERROR: JSON parse failed")
         if attempt < 3 {
             sleep(5)
-            return fetchFlights(attempt: attempt + 1)
+            return fetchFlights(uuids: uuids, attempt: attempt + 1)
         }
         return nil
     }
@@ -244,38 +266,35 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
-print("Monitoring \(aircraftUUIDs.count) company aircraft")
-print("Notifications only for \(homeBase)-based aircraft")
+print("Auto-detecting \(homeBase)-based aircraft...")
 
-guard let currentFlights = fetchFlights() else {
-    print("FATAL: Failed to fetch")
+guard let aircraftBases = fetchAircraftBases() else {
+    print("FATAL: Failed to fetch aircraft bases")
+    exit(1)
+}
+
+// Filter for TEB-based aircraft
+let tebUUIDs = aircraftBases.filter { $0.value == homeBase }.map { $0.key }
+print("Found \(tebUUIDs.count) \(homeBase)-based aircraft: \(tebUUIDs.joined(separator: ", "))")
+
+if tebUUIDs.isEmpty {
+    print("ERROR: No \(homeBase)-based aircraft found")
+    exit(1)
+}
+
+guard let currentFlights = fetchFlights(uuids: tebUUIDs) else {
+    print("FATAL: Failed to fetch flights")
     exit(1)
 }
 
 let upcomingFlights = currentFlights.filter { !$0.isPast() }
-print("Total upcoming: \(upcomingFlights.count)")
+print("Upcoming: \(upcomingFlights.count)")
 
-// Show base information for debugging
-print("\n📋 Aircraft bases:")
-let aircraftByBase = Dictionary(grouping: upcomingFlights) { $0.base ?? "Unknown" }
-for (base, flights) in aircraftByBase.sorted(by: { $0.key < $1.key }) {
-    let aircraft = Set(flights.compactMap { $0.aircraft }).sorted()
-    print("   \(base): \(aircraft.joined(separator: ", "))")
-}
+let foundAircraft = Set(upcomingFlights.compactMap { $0.aircraft }).sorted()
+print("Active aircraft: \(foundAircraft.joined(separator: ", "))")
 
-// Filter for home base aircraft only
-let homeBaseFlights = upcomingFlights.filter { flight in
-    guard let base = flight.base else {
-        print("⚠️  No base info for \(flight.aircraft ?? "unknown") - including by default")
-        return true  // Include if base info missing
-    }
-    return base == homeBase
-}
-
-print("\n\(homeBase)-based aircraft upcoming: \(homeBaseFlights.count)")
-
-print("\n📋 Detected trips/events (\(homeBase) only):")
-for (_, legs) in groupByTrip(homeBaseFlights) {
+print("\n📋 Detected trips/events:")
+for (_, legs) in groupByTrip(upcomingFlights) {
     let route = buildFullRoute(for: legs)
     let aircraft = legs.first?.aircraft ?? "?"
     let eventType = legs.first?.eventTypeName ?? "Unknown"
@@ -284,13 +303,13 @@ for (_, legs) in groupByTrip(homeBaseFlights) {
 
 guard let previous = loadPreviousFlights() else {
     print("\n✓ First run - saving baseline")
-    saveFlights(homeBaseFlights)
+    saveFlights(upcomingFlights)
     exit(0)
 }
 
 let previousUpcoming = previous.filter { !$0.isPast() }
 let previousSet = Set(previousUpcoming)
-let currentSet = Set(homeBaseFlights)
+let currentSet = Set(upcomingFlights)
 
 print("\n🆕 Checking for new events...")
 let newFlights = currentSet.subtracting(previousSet)
@@ -303,9 +322,8 @@ for (_, flights) in newFlightsByTrip {
         continue 
     }
     
-    // Skip repositioning notifications
     guard firstFlight.shouldNotify() else {
-        print("   Skipping repositioning event for \(firstFlight.aircraft ?? "unknown")")
+        print("   Skipping repositioning event")
         continue
     }
     
@@ -324,7 +342,7 @@ for (_, flights) in newFlightsByTrip {
 
 print("\n👥 Checking for crew changes...")
 let previousByTrip = groupByTrip(previousUpcoming)
-let currentByTrip = groupByTrip(homeBaseFlights)
+let currentByTrip = groupByTrip(upcomingFlights)
 
 var crewChanges = 0
 
@@ -361,5 +379,5 @@ for (tripKey, currentLegs) in currentByTrip {
 
 print("   Found \(crewChanges) crew change(s)")
 
-saveFlights(homeBaseFlights)
+saveFlights(upcomingFlights)
 print("\n✓ Done")
