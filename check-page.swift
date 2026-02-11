@@ -3,6 +3,7 @@
 import Foundation
 
 let baseURL = "https://portal.jetinsight.com/schedule/aircraft.json"
+// All company aircraft
 let aircraftUUIDs = [
     "857bca59-d347-4d2f-9aa1-d780a42858f0",
     "e646bec1-3dc7-4d2b-9e31-d39e617dd9c0",
@@ -15,10 +16,7 @@ let aircraftUUIDs = [
     "81971512-bd2c-4939-8d67-57e014160f81",
     "a70c0514-0a7b-4e37-b0c7-4f557942880d"
 ]
-let companyTailNumbers = [
-    "N84UP", "N717KV", "N682D", "N800TL", "N125XP",
-    "N818LX", "N240V", "N361CA", "N850DP", "N488RJ"
-]
+let homeBase = "TEB"  // Only notify for TEB-based aircraft
 let ntfyTopic = "CrewLineup"
 let dataFile = "flights-data.json"
 
@@ -38,6 +36,7 @@ struct Flight: Codable, Hashable {
     let origin: String?
     let pnr: String?
     let eventTypeName: String?
+    let base: String?  // Aircraft home base
     
     init(from dict: [String: Any]) {
         self.start = dict["start"] as? String
@@ -49,6 +48,7 @@ struct Flight: Codable, Hashable {
             self.origin = props["origin_short"] as? String
             self.pnr = props["pnr"] as? String
             self.eventTypeName = props["event_type_name"] as? String
+            self.base = props["base"] as? String
             
             if let crewArray = props["crew"] as? [[String: Any]] {
                 self.crew = crewArray.compactMap { crewDict in
@@ -67,6 +67,7 @@ struct Flight: Codable, Hashable {
             self.origin = nil
             self.pnr = nil
             self.eventTypeName = nil
+            self.base = nil
             self.crew = nil
         }
     }
@@ -76,6 +77,12 @@ struct Flight: Codable, Hashable {
         let formatter = ISO8601DateFormatter()
         guard let startDate = formatter.date(from: startString) else { return false }
         return startDate < Date()
+    }
+    
+    func shouldNotify() -> Bool {
+        guard let eventType = eventTypeName?.lowercased() else { return true }
+        // Skip repositioning notifications
+        return !eventType.contains("repositioning")
     }
 }
 
@@ -158,7 +165,7 @@ func fetchFlights(attempt: Int = 1) -> [Flight]? {
     }
     
     let allFlights = json.map { Flight(from: $0) }
-    print("Found \(allFlights.count) total events from API")
+    print("Found \(allFlights.count) total events")
     return allFlights
 }
 
@@ -237,33 +244,38 @@ func saveFlights(_ flights: [Flight]) {
 }
 
 print("=== Flight check ===")
-print("Company aircraft: \(companyTailNumbers.joined(separator: ", "))")
+print("Monitoring \(aircraftUUIDs.count) company aircraft")
+print("Notifications only for \(homeBase)-based aircraft")
 
-guard let allFlights = fetchFlights() else {
+guard let currentFlights = fetchFlights() else {
     print("FATAL: Failed to fetch")
     exit(1)
 }
 
-let companyFlights = allFlights.filter { flight in
-    guard let tail = flight.aircraft else { return false }
-    return companyTailNumbers.contains(tail)
+let upcomingFlights = currentFlights.filter { !$0.isPast() }
+print("Total upcoming: \(upcomingFlights.count)")
+
+// Show base information for debugging
+print("\n📋 Aircraft bases:")
+let aircraftByBase = Dictionary(grouping: upcomingFlights) { $0.base ?? "Unknown" }
+for (base, flights) in aircraftByBase.sorted(by: { $0.key < $1.key }) {
+    let aircraft = Set(flights.compactMap { $0.aircraft }).sorted()
+    print("   \(base): \(aircraft.joined(separator: ", "))")
 }
 
-print("Filtered to \(companyFlights.count) events for company aircraft")
-
-let foundTailNumbers = Set(companyFlights.compactMap { $0.aircraft })
-let missingTailNumbers = Set(companyTailNumbers).subtracting(foundTailNumbers)
-
-print("\n✓ Found aircraft: \(foundTailNumbers.sorted().joined(separator: ", "))")
-if !missingTailNumbers.isEmpty {
-    print("⚠️  Missing aircraft: \(missingTailNumbers.sorted().joined(separator: ", "))")
+// Filter for home base aircraft only
+let homeBaseFlights = upcomingFlights.filter { flight in
+    guard let base = flight.base else {
+        print("⚠️  No base info for \(flight.aircraft ?? "unknown") - including by default")
+        return true  // Include if base info missing
+    }
+    return base == homeBase
 }
 
-let upcomingFlights = companyFlights.filter { !$0.isPast() }
-print("\nUpcoming: \(upcomingFlights.count)")
+print("\n\(homeBase)-based aircraft upcoming: \(homeBaseFlights.count)")
 
-print("\n📋 Detected trips/events:")
-for (tripKey, legs) in groupByTrip(upcomingFlights) {
+print("\n📋 Detected trips/events (\(homeBase) only):")
+for (_, legs) in groupByTrip(homeBaseFlights) {
     let route = buildFullRoute(for: legs)
     let aircraft = legs.first?.aircraft ?? "?"
     let eventType = legs.first?.eventTypeName ?? "Unknown"
@@ -272,13 +284,13 @@ for (tripKey, legs) in groupByTrip(upcomingFlights) {
 
 guard let previous = loadPreviousFlights() else {
     print("\n✓ First run - saving baseline")
-    saveFlights(upcomingFlights)
+    saveFlights(homeBaseFlights)
     exit(0)
 }
 
 let previousUpcoming = previous.filter { !$0.isPast() }
 let previousSet = Set(previousUpcoming)
-let currentSet = Set(upcomingFlights)
+let currentSet = Set(homeBaseFlights)
 
 print("\n🆕 Checking for new events...")
 let newFlights = currentSet.subtracting(previousSet)
@@ -286,9 +298,15 @@ let newFlightsByTrip = groupByTrip(Array(newFlights))
 
 print("   Found \(newFlightsByTrip.count) new trip(s)/event(s)")
 
-for (tripKey, flights) in newFlightsByTrip {
+for (_, flights) in newFlightsByTrip {
     guard let firstFlight = flights.sorted(by: { ($0.start ?? "") < ($1.start ?? "") }).first else { 
         continue 
+    }
+    
+    // Skip repositioning notifications
+    guard firstFlight.shouldNotify() else {
+        print("   Skipping repositioning event for \(firstFlight.aircraft ?? "unknown")")
+        continue
     }
     
     let time = formatDateTime(firstFlight.start)
@@ -306,7 +324,7 @@ for (tripKey, flights) in newFlightsByTrip {
 
 print("\n👥 Checking for crew changes...")
 let previousByTrip = groupByTrip(previousUpcoming)
-let currentByTrip = groupByTrip(upcomingFlights)
+let currentByTrip = groupByTrip(homeBaseFlights)
 
 var crewChanges = 0
 
@@ -343,5 +361,5 @@ for (tripKey, currentLegs) in currentByTrip {
 
 print("   Found \(crewChanges) crew change(s)")
 
-saveFlights(upcomingFlights)
+saveFlights(homeBaseFlights)
 print("\n✓ Done")
